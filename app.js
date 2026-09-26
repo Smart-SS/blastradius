@@ -85,8 +85,8 @@ function evaluate(resource){
   if(action==="replace"){
     fragments.push({
       severity:"high",
-      trigger:"Action is replace \u2014 Terraform will destroy the existing resource, then create a new one.",
-      impact:"Expect downtime for this resource and possible loss of any state or data it holds. Dependents referencing its ID, ARN, or endpoint may break until the new resource is live.",
+      trigger:"Action is replace \u2014 Terraform plans to recreate this resource. Unless create_before_destroy is set, the existing resource is destroyed before its replacement exists.",
+      impact:"Depending on the resource and lifecycle configuration, expect possible downtime and loss of any state the resource holds. Dependents referencing its ID, ARN, or endpoint may break until the new resource is live.",
       verify:["Identify every resource and app config that references this resource's ID/ARN/endpoint.","Confirm a current backup or snapshot exists before apply.","Schedule a maintenance window if downtime is user-visible."],
       rollback:["Restore the resource from the latest snapshot/backup.","Re-point dependents to the restored identifier.","Revert the Terraform change and re-apply the previous state."]
     });
@@ -94,7 +94,7 @@ function evaluate(resource){
     fragments.push({
       severity:"high",
       trigger:"Action is destroy \u2014 this resource is removed with no replacement.",
-      impact:"Anything depending on this resource loses it permanently once applied. If it stores data, that data is gone unless separately backed up.",
+      impact:"Anything depending on this resource loses it once applied. If it stores data, recovery depends on whatever backups exist outside this plan.",
       verify:["Confirm nothing in production still depends on this resource.","Export or snapshot any data you may need later."],
       rollback:["Recreate the resource from source control or a backup.","Note that some resources (buckets, DBs) cannot be restored to the same name/data instantly."]
     });
@@ -103,7 +103,7 @@ function evaluate(resource){
   if(isStateful(type) && (action==="replace"||action==="destroy")){
     fragments.push({
       severity:"high",
-      trigger:`Stateful resource (${type}) is being ${action}d.`,
+      trigger:`Stateful resource (${type}) is planned for ${action==="replace"?"replacement":"destruction"}.`,
       impact:"Databases, storage, and caches hold data that recreation does not preserve. This is a data-loss risk, not just downtime.",
       verify:["Take a fresh manual snapshot immediately before apply.","Verify point-in-time recovery / final snapshot settings are enabled.","Dry-run the restore path so you know it works under pressure."],
       rollback:["Restore from the pre-apply snapshot.","Validate row counts / object counts against the last known-good state."]
@@ -124,7 +124,7 @@ function evaluate(resource){
     fragments.push({
       severity:"high",
       trigger:"skip_final_snapshot changed to true.",
-      impact:"If this database is deleted or replaced, no final snapshot is taken \u2014 recovery would be impossible from Terraform's action alone.",
+      impact:"If this database is deleted or replaced, Terraform will not take a final snapshot \u2014 recovery would then depend entirely on other backups (automated snapshots, PITR, or manual copies).",
       verify:["Take a manual snapshot yourself before apply.","Reconsider whether skip_final_snapshot should be false for this change."],
       rollback:["Restore from your manual snapshot (the automatic final snapshot will not exist)."]
     });
