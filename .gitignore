@@ -1,0 +1,12 @@
+# macOS
+.DS_Store
+
+# Terraform plan files may contain sensitive values — never commit them
+*.tfplan
+tfplan
+plan.json
+*.tfstate
+*.tfstate.*
+
+# Editor
+.vscode/

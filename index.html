@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Understand the blast radius of a Terraform plan before you apply it.">
+  <title>BlastRadius | Terraform change review</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar"><a class="brand" href="./"><span class="brandmark">B</span> BlastRadius</a><span class="topnote">A safer way to review infrastructure changes</span></header>
+  <main>
+    <section class="hero">
+      <div><span class="eyebrow">TERRAFORM PLAN REVIEW</span><h1>Know the blast radius <em>before</em> you apply.</h1><p>Turn a Terraform JSON plan into a clear change brief. For every risky resource, see the exact change that triggered it, the likely service impact, and a verify-and-rollback checklist.</p><div class="hero-actions"><button id="sample-risky" class="primary">Try a risky plan <span>→</span></button><button id="sample-safe" class="ghost">Try a safe plan</button><label class="upload">Upload your plan JSON <input id="file" type="file" accept=".json,application/json"></label></div><p class="privacy">Your plan stays in this browser. Nothing is uploaded to a server.</p></div>
+      <aside class="hero-card"><span class="card-caption">CHANGE REVIEW / 01</span><div class="pulse">● LIVE ANALYSIS</div><div class="mini-rail"><span>PLAN</span><i></i><span>RISKS</span><i></i><span>DECISION</span></div><div class="card-line"><span>What changes?</span><b>See every action</b></div><div class="card-line"><span>What could break?</span><b>Find the danger</b></div><div class="card-line"><span>What should we ask?</span><b>Review with confidence</b></div></aside>
+    </section>
+    <section class="workspace" id="workspace"><div class="section-head"><div><span class="eyebrow">YOUR REVIEW</span><h2>Change brief</h2></div><span id="filename" class="filename">No plan loaded</span></div><div id="empty" class="empty"><div class="empty-icon">{ }</div><h3>Start with a plan</h3><p>Use the sample above, or export a Terraform plan as JSON and upload it here.</p><code>terraform plan -out=tfplan &amp;&amp; terraform show -json tfplan &gt; plan.json</code></div><div id="results" hidden><div class="summary"><div><span>RESOURCES CHANGING</span><strong id="total">0</strong></div><div><span>CREATED</span><strong id="creates">0</strong></div><div><span>UPDATED</span><strong id="updates">0</strong></div><div><span>DESTROYED / REPLACED</span><strong id="destructive">0</strong></div></div><div class="verdict" id="verdict"></div><section class="panel risks"><div class="panel-title"><h3>What could break if you apply this?</h3><span id="risk-count"></span></div><div id="risk-cards"></div></section><div class="grid"><section class="panel"><h3>Review questions</h3><ol id="questions"></ol></section><section class="panel resources"><div class="panel-title"><h3>Resource changes</h3><span id="resource-count"></span></div><div id="resource-list"></div></section></div><p class="disclaimer">This is a review aid based on the plan file. It cannot prove that a change is safe. Confirm intent, policy, dependencies, and backups before applying.</p></div><div id="error" class="error" role="alert" hidden></div></section>
+    <section class="how"><span class="eyebrow">HOW IT WORKS</span><h2>From plan to decision</h2><div class="steps"><div><b>01</b><h3>Export a plan</h3><p>Create a Terraform JSON plan in your own environment.</p></div><div><b>02</b><h3>Review locally</h3><p>The browser scans actions and selected before/after fields.</p></div><div><b>03</b><h3>Ask better questions</h3><p>Use the findings to guide your change approval.</p></div></div></section>
+  </main><footer><span>BlastRadius · Built for the AWS Zero to Shipped challenge</span><span>Infrastructure changes deserve a second look.</span></footer>
+  <script src="app.js"></script>
+</body></html>
