@@ -1,4 +1,4 @@
-# AWS Zero to Shipped submission draf- **Demo:** Click "Try a risky plan" to show the database replacement, `deletion_protection` removal, `skip_final_snapshot`, and new public exposure — each with its trigger, impact, and verify/rollback checklist. Then click "Try a safe plan" to show the contrast: a clean, standard-review verdict. Finish with the review questions and resource list.
+# AWS Zero to Shipped submission draft
 
 **Project:** BlastRadius
 
@@ -32,10 +32,10 @@ The goal is a more consistent review, especially when the person approving a cha
 
 ## Demo and evidence
 
-- **Live AWS URL:** [ADD VERIFIED CLOUDFRONT URL]
+- **Live AWS URL:** https://dcy31xag10fko.cloudfront.net
 - **Agent-to-console proof:** [ADD REDACTED SCREENSHOT OR TRANSCRIPT]
 - **AWS services:** S3 and CloudFront with Origin Access Control.
-- **Demo:** Click “Try the sample plan”; note the replacement, deletion, and public-access findings. Then show the review questions and resource list.
+- **Demo:** Click "Try a risky plan" to show the database replacement, `deletion_protection` removal, `skip_final_snapshot`, and new public exposure — each with its trigger, impact, and verify/rollback checklist. Then click "Try a safe plan" to show the contrast: a clean, standard-review verdict. Finish with the review questions and resource list.
 - **Validation:** Confirm the public URL opens without login, the sample analysis works, and the judging bot can retrieve the page and assets.
 
 ## Next step

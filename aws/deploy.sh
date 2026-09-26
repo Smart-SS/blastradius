@@ -12,7 +12,13 @@ bucket_name="$(aws cloudformation describe-stacks --region "$aws_region" --stack
 distribution_id="$(aws cloudformation describe-stacks --region "$aws_region" --stack-name "$stack_name" --query "Stacks[0].Outputs[?OutputKey=='DistributionId'].OutputValue | [0]" --output text)"
 public_url="$(aws cloudformation describe-stacks --region "$aws_region" --stack-name "$stack_name" --query "Stacks[0].Outputs[?OutputKey=='PublicURL'].OutputValue | [0]" --output text)"
 for asset in index.html app.js styles.css; do
-  aws s3 cp "$app_dir/$asset" "s3://$bucket_name/$asset" --region "$aws_region" --content-type "$(case "$asset" in *.html) echo text/html;; *.js) echo application/javascript;; *.css) echo text/css;; esac)" --cache-control 'public,max-age=300'
+  case "$asset" in
+    *.html) content_type="text/html";;
+    *.js) content_type="application/javascript";;
+    *.css) content_type="text/css";;
+    *) content_type="application/octet-stream";;
+  esac
+  aws s3 cp "$app_dir/$asset" "s3://$bucket_name/$asset" --region "$aws_region" --content-type "$content_type" --cache-control 'public,max-age=300'
 done
 aws cloudfront create-invalidation --distribution-id "$distribution_id" --paths '/*' >/dev/null
 printf 'Public URL: %s\nDistribution ID: %s\n' "$public_url" "$distribution_id"

@@ -1,147 +1,75 @@
-"use strict";"use strict";
+"use strict";
+// All plan processing stays in the browser. Never render raw plan values or sensitive fields.
+const $ = id => document.getElementById(id);
 
-// All plan processing stays in the browser. Never render raw plan values or sensitive fields.// All plan processing stays in the browser. Never render plan values or sensitive fields.
+// --- Demo plans -------------------------------------------------------------
+// Two realistic before/after stories so reviewers see the depth of judgment.
+const samples = {
+  safe: {
+    label: "Sample: routine web tier deploy",
+    plan: {
+      format_version: "1.2",
+      resource_changes: [
+        {address:"aws_ecs_service.web",type:"aws_ecs_service",change:{actions:["update"],before:{desired_count:3},after:{desired_count:4}}},
+        {address:"aws_appautoscaling_target.web",type:"aws_appautoscaling_target",change:{actions:["update"],before:{max_capacity:6},after:{max_capacity:8}}},
+        {address:"aws_cloudwatch_metric_alarm.cpu_high",type:"aws_cloudwatch_metric_alarm",change:{actions:["create"],before:null,after:{alarm_name:"web-cpu-high"}}},
+        {address:"aws_s3_bucket_lifecycle_configuration.logs",type:"aws_s3_bucket_lifecycle_configuration",change:{actions:["create"],before:null,after:{rule:[{id:"expire-90d"}]}}}
+      ]
+    }
+  },
+  risky: {
+    label: "Sample: order service change (database + exposure)",
+    plan: {
+      format_version: "1.2",
+      resource_changes: [
+        {address:"aws_db_instance.orders",type:"aws_db_instance",change:{actions:["delete","create"],before:{deletion_protection:true,skip_final_snapshot:false,instance_class:"db.r6g.large"},after:{deletion_protection:false,skip_final_snapshot:true,instance_class:"db.r6g.xlarge"}}},
+        {address:"aws_security_group.api",type:"aws_security_group",change:{actions:["update"],before:{ingress:[]},after:{ingress:[{cidr_blocks:["0.0.0.0/0"],from_port:443,to_port:443}]}}},
+        {address:"aws_lb.public_api",type:"aws_lb",change:{actions:["update"],before:{internal:true},after:{internal:false}}},
+        {address:"aws_iam_role_policy.api_access",type:"aws_iam_role_policy",change:{actions:["update"],before:{},after:{}}},
+        {address:"aws_s3_bucket.legacy_logs",type:"aws_s3_bucket",change:{actions:["delete"],before:{bucket:"orders-legacy-logs"},after:null}},
+        {address:"aws_cloudwatch_metric_alarm.api_5xx",type:"aws_cloudwatch_metric_alarm",change:{actions:["create"],before:null,after:{alarm_name:"api-5xx"}}}
+      ]
+    }
+  }
+};
 
-const $ = id => document.getElementById(id);const $ = id => document.getElementById(id);
+const monitoringQuestion = "Will dashboards, alarms, and on-call responders detect a regression during rollout?";
+const ownerQuestion = "Has the service owner reviewed this change and confirmed the expected user impact?";
 
-const sample = {
+// --- Small helpers ----------------------------------------------------------
+function actionOf(actions){
+  if(!Array.isArray(actions)) return "unknown";
+  if(actions.includes("delete") && actions.includes("create")) return "replace";
+  if(actions.includes("delete")) return "destroy";
+  if(actions.includes("create")) return "create";
+  if(actions.includes("update")) return "update";
+  return "no-op";
+}
+const STATEFUL = /^(aws_db_|aws_rds_|aws_dynamodb_|aws_s3_bucket|aws_ebs_|aws_elasticache_|aws_efs_|aws_redshift_)/;
+function isStateful(type){ return STATEFUL.test(type); }
 
-// --- Demo plans -------------------------------------------------------------  format_version: "1.2",
-
-// Two realistic before/after stories so reviewers see the depth of judgment.  resource_changes: [
-
-const samples = {    {address:"aws_lb.public_api",type:"aws_lb",change:{actions:["update"],before:{internal:true},after:{internal:false}}},
-
-  safe: {    {address:"aws_security_group.api",type:"aws_security_group",change:{actions:["update"],before:{ingress:[]},after:{ingress:[{cidr_blocks:["0.0.0.0/0"],from_port:443,to_port:443}]}}},
-
-    label: "Sample: routine web tier deploy",    {address:"aws_db_instance.orders",type:"aws_db_instance",change:{actions:["delete","create"],before:{deletion_protection:true},after:{deletion_protection:false}}},
-
-    plan: {    {address:"aws_s3_bucket.logs",type:"aws_s3_bucket",change:{actions:["delete"],before:{bucket:"example-logs"},after:null}},
-
-      format_version: "1.2",    {address:"aws_cloudwatch_metric_alarm.api_errors",type:"aws_cloudwatch_metric_alarm",change:{actions:["create"],before:null,after:{alarm_name:"api-errors"}}}
-
-      resource_changes: [  ]
-
-        {address:"aws_ecs_service.web",type:"aws_ecs_service",change:{actions:["update"],before:{desired_count:3},after:{desired_count:4}}},};
-
-        {address:"aws_appautoscaling_target.web",type:"aws_appautoscaling_target",change:{actions:["update"],before:{max_capacity:6},after:{max_capacity:8}}},const questions = {
-
-        {address:"aws_cloudwatch_metric_alarm.cpu_high",type:"aws_cloudwatch_metric_alarm",change:{actions:["create"],before:null,after:{alarm_name:"web-cpu-high"}}},  destructive:"Do we have a verified backup and a rollback path for the resources being destroyed or replaced?",
-
-        {address:"aws_s3_bucket_lifecycle_configuration.logs",type:"aws_s3_bucket_lifecycle_configuration",change:{actions:["create"],before:null,after:{rule:[{id:"expire-90d"}]}}}  exposure:"Is this public exposure intended, and are network controls and authentication in place?",
-
-      ]  database:"Have we checked data preservation, application connections, and the maintenance window?",
-
-    }  monitoring:"Will dashboards, alarms, and on-call responders detect a regression during rollout?",
-
-  },  general:"Has the service owner reviewed this change and its expected user impact?"
-
-  risky: {};
-
-    label: "Sample: order service change (database + exposure)",function actionOf(actions){
-
-    plan: {  if(!Array.isArray(actions)) return "unknown";
-
-      format_version: "1.2",  if(actions.includes("delete") && actions.includes("create")) return "replace";
-
-      resource_changes: [  if(actions.includes("delete")) return "destroy";
-
-        {address:"aws_db_instance.orders",type:"aws_db_instance",change:{actions:["delete","create"],before:{deletion_protection:true,skip_final_snapshot:false,instance_class:"db.r6g.large"},after:{deletion_protection:false,skip_final_snapshot:true,instance_class:"db.r6g.xlarge"}}},  if(actions.includes("create")) return "create";
-
-        {address:"aws_security_group.api",type:"aws_security_group",change:{actions:["update"],before:{ingress:[]},after:{ingress:[{cidr_blocks:["0.0.0.0/0"],from_port:443,to_port:443}]}}},  if(actions.includes("update")) return "update";
-
-        {address:"aws_lb.public_api",type:"aws_lb",change:{actions:["update"],before:{internal:true},after:{internal:false}}},  return "no-op";
-
-        {address:"aws_iam_role_policy.api_access",type:"aws_iam_role_policy",change:{actions:["update"],before:{},after:{}}},}
-
-        {address:"aws_s3_bucket.legacy_logs",type:"aws_s3_bucket",change:{actions:["delete"],before:{bucket:"orders-legacy-logs"},after:null}},function hasPublic(value){
-
-        {address:"aws_cloudwatch_metric_alarm.api_5xx",type:"aws_cloudwatch_metric_alarm",change:{actions:["create"],before:null,after:{alarm_name:"api-5xx"}}}  // Inspect recognized network fields only. Avoid serializing or showing secrets.
-
-      ]  if(!value || typeof value!=="object") return false;
-
-    }  if(value.internal===false || value.publicly_accessible===true) return true;
-
-  }  const rules=[...(Array.isArray(value.ingress)?value.ingress:[]),...(Array.isArray(value.ingress_with_cidr_blocks)?value.ingress_with_cidr_blocks:[])];
-
-};  return rules.some(rule=>{
-
-    const blocks=[...(rule.cidr_blocks||[]),...(rule.ipv6_cidr_blocks||[])];
-
-const monitoringQuestion = "Will dashboards, alarms, and on-call responders detect a regression during rollout?";    if(rule.cidr_blocks && typeof rule.cidr_blocks==="string") blocks.push(rule.cidr_blocks);
-
-const ownerQuestion = "Has the service owner reviewed this change and confirmed the expected user impact?";    return blocks.includes("0.0.0.0/0") || blocks.includes("::/0");
-
+function openCidrs(value){
+  // Inspect recognized network fields only. Never serialize or show secrets.
+  if(!value || typeof value!=="object") return [];
+  const rules=[...(Array.isArray(value.ingress)?value.ingress:[]),...(Array.isArray(value.ingress_with_cidr_blocks)?value.ingress_with_cidr_blocks:[])];
+  const ports=[];
+  rules.forEach(rule=>{
+    const blocks=[...(Array.isArray(rule.cidr_blocks)?rule.cidr_blocks:[]),...(Array.isArray(rule.ipv6_cidr_blocks)?rule.ipv6_cidr_blocks:[])];
+    if(typeof rule.cidr_blocks==="string") blocks.push(rule.cidr_blocks);
+    if(blocks.includes("0.0.0.0/0")||blocks.includes("::/0")){
+      const from=rule.from_port, to=rule.to_port;
+      ports.push(from===undefined?"all ports":from===to?`port ${from}`:`ports ${from}-${to}`);
+    }
   });
-
-// --- Small helpers ----------------------------------------------------------}
-
-function actionOf(actions){function analyze(plan){
-
-  if(!Array.isArray(actions)) return "unknown";  if(!plan || !Array.isArray(plan.resource_changes)) throw new Error("This is not a Terraform JSON plan with resource_changes. Run terraform show -json tfplan > plan.json.");
-
-  if(actions.includes("delete") && actions.includes("create")) return "replace";  if(plan.resource_changes.length>10000) throw new Error("This plan is too large for the browser review (10,000 resource changes maximum).");
-
-  if(actions.includes("delete")) return "destroy";  const resources=plan.resource_changes.map(item=>({address:String(item.address||"Unknown resource"),type:String(item.type||""),action:actionOf(item.change?.actions),before:item.change?.before,after:item.change?.after})).filter(item=>item.action!=="no-op");
-
-  if(actions.includes("create")) return "create";  const findings=[];const add=(level,title,detail,key)=>findings.push({level,title,detail,key});
-
-  if(actions.includes("update")) return "update";  const destructive=resources.filter(r=>["replace","destroy"].includes(r.action));
-
-  return "no-op";  if(destructive.length) add("high",`${destructive.length} resource${destructive.length===1?"":"s"} destroyed or replaced`,"Replacement can cause downtime or data loss. Check dependencies, backups, and rollback.","destructive");
-
-}  const data=destructive.filter(r=>/^(aws_db_|aws_rds_|aws_dynamodb_|aws_s3_bucket|aws_ebs_|aws_elasticache_)/.test(r.type));
-
-const STATEFUL = /^(aws_db_|aws_rds_|aws_dynamodb_|aws_s3_bucket|aws_ebs_|aws_elasticache_|aws_efs_|aws_redshift_)/;  if(data.length) add("high",`${data.length} stateful resource${data.length===1?"":"s"} affected`,"Database, storage, or cache changes deserve a data preservation check.","database");
-
-function isStateful(type){ return STATEFUL.test(type); }  const publicResources=resources.filter(r=>["create","replace","update"].includes(r.action)&&hasPublic(r.after)&&!hasPublic(r.before));
-
-  if(publicResources.length) add("high",`${publicResources.length} resource${publicResources.length===1?"":"s"} gaining public access`,"A load balancer, database, or network rule may become reachable from the internet.","exposure");
-
-function openCidrs(value){  const changedIam=resources.filter(r=>/^aws_iam_/.test(r.type)&&r.action!=="destroy");
-
-  // Inspect recognized network fields only. Never serialize or show secrets.  if(changedIam.length) add("medium",`${changedIam.length} IAM resource${changedIam.length===1?"":"s"} changing`,"Review the effective permissions and trust relationships.","general");
-
-  if(!value || typeof value!=="object") return [];  const changedNetwork=resources.filter(r=>/^aws_(security_group|route|vpc|subnet|network_acl)/.test(r.type));
-
-  const rules=[...(Array.isArray(value.ingress)?value.ingress:[]),...(Array.isArray(value.ingress_with_cidr_blocks)?value.ingress_with_cidr_blocks:[])];  if(changedNetwork.length&&!publicResources.length) add("medium",`${changedNetwork.length} network resource${changedNetwork.length===1?"":"s"} changing`,"Confirm traffic paths and dependent services after deployment.","general");
-
-  const ports=[];  if(!findings.length) add("low","No priority pattern detected","Still review the full diff and validate service-specific behavior before applying.","general");
-
-  rules.forEach(rule=>{  return {resources,findings,questions:[...new Set([...findings.map(f=>questions[f.key]),questions.monitoring,questions.general])].slice(0,5)};
-
-    const blocks=[...(Array.isArray(rule.cidr_blocks)?rule.cidr_blocks:[]),...(Array.isArray(rule.ipv6_cidr_blocks)?rule.ipv6_cidr_blocks:[])];}
-
-    if(typeof rule.cidr_blocks==="string") blocks.push(rule.cidr_blocks);function node(tag,cls,value){const el=document.createElement(tag);if(cls)el.className=cls;if(value!==undefined)el.textContent=value;return el;}
-
-    if(blocks.includes("0.0.0.0/0")||blocks.includes("::/0")){function render(plan,name){
-
-      const from=rule.from_port, to=rule.to_port;  const report=analyze(plan),rs=report.resources,counts={create:0,update:0,destroy:0,replace:0};rs.forEach(r=>{if(counts[r.action]!==undefined)counts[r.action]++;});
-
-      ports.push(from===undefined?"all ports":from===to?`port ${from}`:`ports ${from}-${to}`);  $("total").textContent=rs.length;$("creates").textContent=counts.create;$("updates").textContent=counts.update;$("destructive").textContent=counts.destroy+counts.replace;
-
-    }  $("filename").textContent=name;$("finding-count").textContent=report.findings.length;$("resource-count").textContent=`${rs.length} changes`;
-
-  });  const severity=report.findings.some(f=>f.level==="high")?"high":report.findings.some(f=>f.level==="medium")?"medium":"low";
-
-  return ports;  const verdict=$("verdict");verdict.className=`verdict ${severity}`;verdict.replaceChildren(node("span","verdict-icon",severity==="high"?"⚠":"◈"));const copy=node("div");copy.append(node("b",null,severity==="high"?"High attention change":severity==="medium"?"Review recommended":"Standard review"),node("p",null,severity==="high"?"Pause for a focused review before apply.":"Check the findings and confirm the intended outcome."));verdict.append(copy);
-
-}  $("findings").replaceChildren(...report.findings.map(f=>{const el=node("div","finding");const title=node("strong");title.append(node("span",`tag ${f.level}`,f.level.toUpperCase()),document.createTextNode(f.title));el.append(title,node("p",null,f.detail));return el;}));
-
-function becamePublic(before,after){  $("questions").replaceChildren(...report.questions.map(q=>node("li",null,q)));
-
-  const b=before||{}, a=after||{};  $("resource-list").replaceChildren(...rs.map(r=>{const el=node("div","resource");el.append(node("code",null,r.address),node("span",`action ${r.action}`,r.action.toUpperCase()));return el;}));
-
-  const signals=[];  $("empty").hidden=true;$("error").hidden=true;$("results").hidden=false;$("workspace").scrollIntoView({behavior:"smooth",block:"start"});
-
-  if(b.internal!==false && a.internal===false) signals.push("load balancer scheme changed internal \u2192 internet-facing");}
-
-  if(b.publicly_accessible!==true && a.publicly_accessible===true) signals.push("publicly_accessible changed false \u2192 true");function fail(message){$("error").textContent=message;$("error").hidden=false;}
-
-  const newPorts=openCidrs(a).filter(p=>!openCidrs(b).includes(p));$("sample").addEventListener("click",()=>render(sample,"Sample: online store rollout"));
-
-  if(newPorts.length) signals.push(`ingress opened to 0.0.0.0/0 on ${newPorts.join(", ")}`);$("file").addEventListener("change",async event=>{const file=event.target.files?.[0];if(!file)return;if(file.size>10*1024*1024){fail("The file exceeds the 10 MB limit.");return;}try{render(JSON.parse(await file.text()),file.name);}catch(error){fail(error instanceof SyntaxError?"The selected file is not valid JSON.":error.message);}finally{event.target.value="";}});
-
+  return ports;
+}
+function becamePublic(before,after){
+  const b=before||{}, a=after||{};
+  const signals=[];
+  if(b.internal!==false && a.internal===false) signals.push("load balancer scheme changed internal \u2192 internet-facing");
+  if(b.publicly_accessible!==true && a.publicly_accessible===true) signals.push("publicly_accessible changed false \u2192 true");
+  const newPorts=openCidrs(a).filter(p=>!openCidrs(b).includes(p));
+  if(newPorts.length) signals.push(`ingress opened to 0.0.0.0/0 on ${newPorts.join(", ")}`);
   return signals;
 }
 
