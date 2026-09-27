@@ -57,7 +57,10 @@ const fixture={
     {address:"aws_db_instance.unknown",type:"aws_db_instance",change:{actions:["update"],before:{deletion_protection:true},after:{deletion_protection:false},after_unknown:{backup_retention_period:true},after_sensitive:{policy:true}}},
     // 21) Un-flagged resources with unknown non-watched fields (endpoint, environment)
     {address:"aws_db_instance.endpoint_unknown",type:"aws_db_instance",change:{actions:["update"],before:{instance_class:"db.t3.micro"},after:{instance_class:"db.t3.small"},after_unknown:{endpoint:true}}},
-    {address:"aws_lambda_function.env",type:"aws_lambda_function",change:{actions:["update"],before:{memory_size:128},after:{memory_size:256},after_sensitive:{environment:[{variables:true}]}}}
+    {address:"aws_lambda_function.env",type:"aws_lambda_function",change:{actions:["update"],before:{memory_size:128},after:{memory_size:256},after_sensitive:{environment:[{variables:true}]}}},
+    // 22) KNOWN sensitive value: policy present in after, marked sensitive, contains a secret marker.
+    // Must be analyzed (anonymous principal flagged) but the secret must not appear in output.
+    {address:"aws_s3_bucket_policy.sensitive",type:"aws_s3_bucket_policy",change:{actions:["update"],before:{policy:'{"Version":"2012-10-17","Statement":[]}'},after:{policy:'{"Version":"2012-10-17","Statement":[{"Sid":"SECRET_MARKER_XYZ","Effect":"Allow","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::sens/*"}]}'},after_sensitive:{policy:true}}}
   ],
   configuration:{root_module:{
     resources:[{address:"aws_ecs_service.api",expressions:{network_configuration:{references:["module.net.aws_security_group.inner.id","module.net.aws_security_group.inner"]}}}],
@@ -99,7 +102,7 @@ T("Multi-AZ disabled flagged", /multi_az changed true \u2192 false/.test((card("
 T("CloudTrail logging disabled flagged high", (card("aws_cloudtrail.main")||{severity:""}).severity==="high");
 T("NAT gateway destroy flagged", Boolean(card("aws_nat_gateway.a")));
 T("after_unknown caveat surfaced on flagged card", /backup_retention_period is not known until apply/.test((card("aws_db_instance.unknown")||{caveats:[]}).caveats.join(" ")));
-T("after_sensitive caveat surfaced on flagged card", /policy is masked as sensitive/.test((card("aws_db_instance.unknown")||{caveats:[]}).caveats.join(" ")));
+T("after_sensitive (absent value) caveat: could not be analyzed", /policy is marked sensitive and its value is absent/.test((card("aws_db_instance.unknown")||{caveats:[]}).caveats.join(" ")));
 T("Risk score present and positive", typeof r.score==="number" && r.score>0 && r.score<=10);
 T("Coverage disclosure lists 12 checks", Array.isArray(r.checks) && r.checks.length===12);
 const md=toMarkdown(r,"fixture.json",null,"");
@@ -107,8 +110,12 @@ T("Markdown includes risk score", /Risk score/.test(md));
 T("Markdown includes 'Not evaluable from this plan'", /Not evaluable from this plan/.test(md));
 T("Markdown includes coverage disclosure section", /## Coverage \u2014 what this review checked/.test(md) && r.checks.every(c=>md.includes(c)));
 T("Plan-level unknowns include non-watched endpoint field", r.unknowns.some(u=>u.address==="aws_db_instance.endpoint_unknown"&&/endpoint is not known until apply/.test(u.caveats.join(" "))));
-T("Plan-level unknowns include sensitive lambda environment", r.unknowns.some(u=>u.address==="aws_lambda_function.env"&&/environment is masked as sensitive/.test(u.caveats.join(" "))));
-T("Markdown lists plan-level unknowns (endpoint, environment)", /aws_db_instance\.endpoint_unknown/.test(md) && /environment is masked as sensitive/.test(md));
+T("Plan-level unknowns include sensitive lambda environment (absent value)", r.unknowns.some(u=>u.address==="aws_lambda_function.env"&&/environment is marked sensitive and its value is absent/.test(u.caveats.join(" "))));
+T("Markdown lists plan-level unknowns (endpoint, environment)", /aws_db_instance\.endpoint_unknown/.test(md) && /environment is marked sensitive/.test(md));
+T("Known sensitive policy is still analyzed (anonymous principal flagged)", (()=>{const c=card("aws_s3_bucket_policy.sensitive");return c && c.triggers.some(t=>/Principal "\*"/.test(t));})());
+T("Known sensitive policy: caveat says analyzed but redacted from report", /analyzed by the supported checks, but it is not shown in this report/.test((card("aws_s3_bucket_policy.sensitive")||{caveats:[]}).caveats.join(" ")));
+T("Redaction: sensitive policy contents not repeated in card or Markdown", (()=>{const c=card("aws_s3_bucket_policy.sensitive");if(!c)return false;const all=JSON.stringify(c)+md;return !all.includes("SECRET_MARKER_XYZ") && !/for s3:GetObject.*sensitive/.test(c.triggers.join(" "));})());
+T("Redaction note appears on sensitive-policy trigger", /marked sensitive, so its contents are not repeated/.test((card("aws_s3_bucket_policy.sensitive")||{triggers:[]}).triggers.join(" ")));
 T("Launch template: workload/data impact wording, no absolute 'No data is at risk'", (()=>{const c=card("aws_launch_template.app");if(!c)return false;const all=c.impacts.join(" ");return /Review potential workload and data impacts separately/.test(all)&&!/No data is at risk/.test(all);})());
 T("Launch template rollback distinguishes version vs whole-template, no availability assumption", (()=>{const c=card("aws_launch_template.app");if(!c)return false;const rb=c.rollback.join(" ");return /If only a new version was created/.test(rb)&&/may no longer exist/.test(rb)&&!/versions are retained/.test(rb);})());
 T("Launch template replace: no generic snapshot/backup rollback", !/backup\/snapshot|data comes back only from backups/.test((card("aws_launch_template.app")||{rollback:[]}).rollback.join(" ")));

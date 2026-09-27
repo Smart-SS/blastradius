@@ -179,6 +179,8 @@ function evaluate(resource){
   const {type, action, before, after, rawActions} = resource;
   const fragments=[];
   const b=before||{}, a=after||{};
+  const sens=resource.afterSensitive&&typeof resource.afterSensitive==="object"?resource.afterSensitive:{};
+  const isSensitive=f=>Boolean(sens[f]);
 
   // Tag-only updates: nothing but tags/tags_all changed. Suppress noise.
   if(action==="update"){
@@ -364,7 +366,7 @@ function evaluate(resource){
     if(anon && !policyAllowsAnonymous(b.policy)){
       fragments.push({
         severity:"high",
-        trigger:`Bucket policy adds an Allow statement with Principal "*"${anon.actions?` for ${anon.actions}`:""}.`,
+        trigger:`Bucket policy adds an Allow statement with Principal "*"${anon.actions&&!isSensitive("policy")?` for ${anon.actions}`:""}.${isSensitive("policy")?" The policy is marked sensitive, so its contents are not repeated in this report.":""}`,
         impact:"This statement would permit anonymous requests for the granted actions on matching objects. Whether requests actually succeed also depends on the bucket's public access block, ACLs, and any deny statements.",
         verify:["Confirm anonymous access is intended (e.g., a public website bucket) and scoped to exactly the right prefix.","Check that no sensitive objects share this bucket."],
         rollback:["Remove or scope the anonymous statement.","Audit S3 access logs for anonymous requests during the window."]
@@ -547,7 +549,10 @@ function unknownCaveats(resource){
     caveats.push(`${f} is not known until apply \u2014 ${watched?"the related checks could not evaluate its final value; review at apply time.":"its final value cannot be reviewed from this plan."}`);
   });
   unknownFields(resource.afterSensitive).forEach(f=>{
-    caveats.push(`${f} is masked as sensitive \u2014 its value cannot be reviewed from this plan.`);
+    const present=resource.after&&typeof resource.after==="object"&&resource.after[f]!==undefined&&resource.after[f]!==null;
+    caveats.push(present
+      ?`${f} is marked sensitive \u2014 the value is present in the plan and was analyzed by the supported checks, but it is not shown in this report. Redaction covers this report's output only, not the plan file itself.`
+      :`${f} is marked sensitive and its value is absent from this plan \u2014 it could not be analyzed; review it at apply time.`);
   });
   return [...new Set(caveats)];
 }
@@ -566,7 +571,7 @@ const CHECKS=[
   "Encryption disabled (storage_encrypted, encrypted), multi_az downgrade, CloudTrail logging disabled",
   "ECS desired_count scaled to zero, CloudWatch alarm actions disabled",
   "Route / NAT / internet gateway deletion",
-  "Fields unknown-until-apply or masked as sensitive are reported, not silently skipped"
+  "Fields unknown-until-apply are reported, not silently skipped. Sensitive-marked fields are analyzed when their value is present in the plan and are redacted from this report's output; redaction of the plan file itself is out of scope"
 ];
 
 // Severity-weighted risk score, 0-10. A communication aid, not a safety metric.
@@ -662,7 +667,7 @@ function toMarkdown(report,name,comparison,baseName){
   lines.push(``);
   lines.push(`## Not evaluable from this plan`,``);
   if(report.unknowns.length){
-    lines.push(`These field values are unknown until apply or masked as sensitive, so they could not be reviewed:`,``);
+    lines.push(`These fields are unknown until apply or marked sensitive. Unknown values could not be reviewed; sensitive values are analyzed when present in the plan but redacted from this report:`,``);
     report.unknowns.forEach(u=>{
       lines.push(`- \`${u.address}\``);
       u.caveats.forEach(c=>lines.push(`  - ${c}`));
@@ -807,7 +812,7 @@ function render(plan,name,{asComparison=false}={}){
   if(unk){
     if(report.unknowns.length){
       const items=report.unknowns.flatMap(u=>u.caveats.map(c=>`${u.address}: ${c}`));
-      unk.replaceChildren(node("p","dep-note","These field values are unknown until apply or masked as sensitive, so they could not be reviewed:"),list(items));
+      unk.replaceChildren(node("p","dep-note","These fields are unknown until apply or marked sensitive. Unknown values could not be reviewed; sensitive values are analyzed when present in the plan but redacted from this report:"),list(items));
     } else {
       unk.replaceChildren(node("p","dep-note","No unknown-until-apply or sensitive-masked fields were reported in this plan."));
     }
