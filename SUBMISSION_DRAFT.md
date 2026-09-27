@@ -28,13 +28,21 @@ The goal is a more consistent review, especially when the person approving a cha
 
 ## Build process and coding agent
 
-**Complete after an actual AWS console connection:** name the coding agent, describe how it was connected to the console, add redacted proof, and explain its concrete contribution to the build or deployment. Do not claim a connection until it has happened.
+Built from hands-on experience reviewing Terraform changes across many AWS accounts. A coding agent — **GitHub Copilot in VS Code** — made the following documented, verifiable contributions:
+
+- Implemented the browser interface and the deterministic risk-rule engine (triggers, impacts, verify/rollback checklists) in `app.js`.
+- Deployed the infrastructure with the AWS CLI using my credentials: created/updated the CloudFormation stack `blast-radius-contest` (private S3 bucket + CloudFront distribution with Origin Access Control), uploaded assets with correct content types, and invalidated the CloudFront cache.
+- Connected to my AWS account through the **AWS MCP server** and performed a read-only inspection of the live distribution (`cloudfront:ListDistributions`, `cloudfront:GetDistribution`), confirming status **Deployed**, viewer protocol `redirect-to-https`, the private S3 origin `blast-radius-contest-assetsbucket-*`, and the attached Origin Access Control.
+- Diagnosed and fixed real defects along the way: a merged/duplicated `app.js`, a broken content-type `case` in `deploy.sh`, and over-certain risk wording.
+
+**Proof:** [ADD REDACTED TRANSCRIPT — paste the AWS MCP tool call and result showing the CloudFront inspection, plus the deploy output; redact the AWS account ID before publishing.]
 
 ## Demo and evidence
 
 - **Live AWS URL:** https://dcy31xag10fko.cloudfront.net
+- **Source code:** https://github.com/Smart-SS/blastradius
 - **Agent-to-console proof:** [ADD REDACTED SCREENSHOT OR TRANSCRIPT]
-- **AWS services:** S3 and CloudFront with Origin Access Control.
+- **AWS services:** S3 and CloudFront with Origin Access Control, provisioned via CloudFormation.
 - **Demo:** Click "Try a risky plan" to show the database replacement, `deletion_protection` removal, `skip_final_snapshot`, and new public exposure — each with its trigger, impact, and verify/rollback checklist. Then click "Try a safe plan" to show the contrast: a clean, standard-review verdict. Finish with the review questions and resource list.
 - **Validation:** Confirm the public URL opens without login, the sample analysis works, and the judging bot can retrieve the page and assets.
 
