@@ -54,7 +54,10 @@ const fixture={
     // 19) NAT gateway destroyed
     {address:"aws_nat_gateway.a",type:"aws_nat_gateway",change:{actions:["delete"],before:{id:"nat-1"},after:null}},
     // 20) Flagged resource with an unknown watched field (after_unknown) and a sensitive one
-    {address:"aws_db_instance.unknown",type:"aws_db_instance",change:{actions:["update"],before:{deletion_protection:true},after:{deletion_protection:false},after_unknown:{backup_retention_period:true},after_sensitive:{policy:true}}}
+    {address:"aws_db_instance.unknown",type:"aws_db_instance",change:{actions:["update"],before:{deletion_protection:true},after:{deletion_protection:false},after_unknown:{backup_retention_period:true},after_sensitive:{policy:true}}},
+    // 21) Un-flagged resources with unknown non-watched fields (endpoint, environment)
+    {address:"aws_db_instance.endpoint_unknown",type:"aws_db_instance",change:{actions:["update"],before:{instance_class:"db.t3.micro"},after:{instance_class:"db.t3.small"},after_unknown:{endpoint:true}}},
+    {address:"aws_lambda_function.env",type:"aws_lambda_function",change:{actions:["update"],before:{memory_size:128},after:{memory_size:256},after_sensitive:{environment:[{variables:true}]}}}
   ],
   configuration:{root_module:{
     resources:[{address:"aws_ecs_service.api",expressions:{network_configuration:{references:["module.net.aws_security_group.inner.id","module.net.aws_security_group.inner"]}}}],
@@ -75,7 +78,7 @@ T("S3 public access block weakening flagged", /block_public_acls true \u2192 fal
 T("Anonymous bucket policy flagged", /Principal "\*"/.test((card("aws_s3_bucket_policy.site")||{triggers:[]}).triggers.join(" ")));
 T("Lifecycle 365->7 flagged (array-shaped)", /365 \u2192 7/.test((card("aws_s3_bucket_lifecycle_configuration.logs")||{triggers:[]}).triggers.join(" ")));
 T("Lifecycle 90->3 flagged (object-shaped)", /90 \u2192 3/.test((card("aws_s3_bucket_lifecycle_configuration.obj")||{triggers:[]}).triggers.join(" ")));
-T("Launch template: template-specific guidance (versions/ASG), no backup advice", (()=>{const c=card("aws_launch_template.app");if(!c)return false;const all=c.verify.join(" ")+c.rollback.join(" ")+c.impacts.join(" ");return /previous template version/.test(all)&&/Auto Scaling/.test(all)&&!/snapshot or backup|PITR/.test(all);})());
+T("Launch template: template-specific guidance (versions/ASG), no backup advice", (()=>{const c=card("aws_launch_template.app");if(!c)return false;const all=c.verify.join(" ")+c.rollback.join(" ")+c.impacts.join(" ");return /previous version/.test(all)&&/Auto Scaling/.test(all)&&!/snapshot or backup|PITR/.test(all);})());
 T("Anonymous policy wording acknowledges other controls", /also depends on the bucket's public access block/.test((card("aws_s3_bucket_policy.site")||{impacts:[]}).impacts.join(" ")));
 T("IAM wildcard wording acknowledges boundaries/SCPs", /permissions boundaries, SCPs/.test((card("aws_iam_role_policy.app")||{impacts:[]}).impacts.join(" ")));
 T("Ingress wording: permissive rule, reachability not asserted", /Actual internet reachability also depends/.test((card("aws_security_group_rule.pg_world")||{impacts:[]}).impacts.join(" ")));
@@ -102,6 +105,14 @@ T("Coverage disclosure lists 12 checks", Array.isArray(r.checks) && r.checks.len
 const md=toMarkdown(r,"fixture.json",null,"");
 T("Markdown includes risk score", /Risk score/.test(md));
 T("Markdown includes 'Not evaluable from this plan'", /Not evaluable from this plan/.test(md));
+T("Markdown includes coverage disclosure section", /## Coverage \u2014 what this review checked/.test(md) && r.checks.every(c=>md.includes(c)));
+T("Plan-level unknowns include non-watched endpoint field", r.unknowns.some(u=>u.address==="aws_db_instance.endpoint_unknown"&&/endpoint is not known until apply/.test(u.caveats.join(" "))));
+T("Plan-level unknowns include sensitive lambda environment", r.unknowns.some(u=>u.address==="aws_lambda_function.env"&&/environment is masked as sensitive/.test(u.caveats.join(" "))));
+T("Markdown lists plan-level unknowns (endpoint, environment)", /aws_db_instance\.endpoint_unknown/.test(md) && /environment is masked as sensitive/.test(md));
+T("Launch template: workload/data impact wording, no absolute 'No data is at risk'", (()=>{const c=card("aws_launch_template.app");if(!c)return false;const all=c.impacts.join(" ");return /Review potential workload and data impacts separately/.test(all)&&!/No data is at risk/.test(all);})());
+T("Launch template rollback distinguishes version vs whole-template, no availability assumption", (()=>{const c=card("aws_launch_template.app");if(!c)return false;const rb=c.rollback.join(" ");return /If only a new version was created/.test(rb)&&/may no longer exist/.test(rb)&&!/versions are retained/.test(rb);})());
+T("Launch template replace: no generic snapshot/backup rollback", !/backup\/snapshot|data comes back only from backups/.test((card("aws_launch_template.app")||{rollback:[]}).rollback.join(" ")));
+T("Launch template: single consistent fragment (no generic replace trigger)", (()=>{const c=card("aws_launch_template.app");return c && !c.triggers.some(t=>/^Action is replace/.test(t)) && c.triggers.some(t=>/creates the replacement before destroying/.test(t));})());
 
 // regression: shipped samples still behave
 const risky=analyze(samples.risky.plan), safe=analyze(samples.safe.plan);

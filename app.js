@@ -187,7 +187,8 @@ function evaluate(resource){
     if(changedKeys.length && changedKeys.every(k=>k==="tags"||k==="tags_all")) return fragments;
   }
 
-  if(action==="replace"){
+  const isLaunchCfg=/^aws_launch_(template|configuration)$/.test(type);
+  if(action==="replace" && !isLaunchCfg){
     const order=replaceOrder(rawActions);
     const orderText=order==="create_before_destroy"
       ?"This plan creates the replacement before destroying the old resource (create-before-destroy), which reduces \u2014 but does not eliminate \u2014 downtime risk during cutover."
@@ -201,7 +202,7 @@ function evaluate(resource){
       verify:["Identify every resource and app config that references this resource's ID/ARN/endpoint.","Schedule a maintenance window if downtime is user-visible."],
       rollback:["Note that reverting the Terraform configuration restores the settings, not any data lost during replacement \u2014 data comes back only from backups.","First restore data from a backup/snapshot if the resource held state (see resource-specific guidance).","Then revert the Terraform change, re-apply, and re-point dependents if identifiers or endpoints changed."]
     });
-  } else if(action==="destroy"){
+  } else if(action==="destroy" && !isLaunchCfg){
     fragments.push({
       severity:"high",
       trigger:"Action is destroy \u2014 this resource is removed with no replacement.",
@@ -215,15 +216,21 @@ function evaluate(resource){
     fragments.push(Object.assign({severity:"high"}, statefulGuidance(type, action)));
   }
 
-  // Launch templates are configuration, not data: recovery is about the
-  // previous template version and dependent Auto Scaling groups, not backups.
-  if(/^aws_launch_(template|configuration)$/.test(type) && (action==="replace"||action==="destroy")){
+  // Launch templates/configurations get dedicated guidance instead of the
+  // generic replace/destroy fragments, so the card carries one consistent
+  // rollout-focused message (no snapshot/backup advice, no absolutes).
+  if(isLaunchCfg && (action==="replace"||action==="destroy")){
+    const order=replaceOrder(rawActions);
+    const orderText=action!=="replace"?""
+      :order==="create_before_destroy"?" The plan creates the replacement before destroying the old one."
+      :order==="destroy_before_create"?" The plan destroys the existing one before creating its replacement."
+      :" Replacement order could not be determined from this plan.";
     fragments.push({
       severity:"medium",
-      trigger:`Launch template/configuration (${type}) is planned for ${action==="replace"?"replacement":"destruction"}.`,
-      impact:"No data is at risk \u2014 this is instance configuration. The risk is rollout: Auto Scaling groups referencing it will launch new instances with the new configuration, and a bad template surfaces only as instances cycle.",
-      verify:["Identify the Auto Scaling groups and services that reference this template.","Confirm how the rollout happens (instance refresh, gradual replacement, or only new launches).","Canary or verify one instance with the new configuration before a full refresh."],
-      rollback:["Point the ASG back to the previous template version (versions are retained unless explicitly deleted).","Trigger an instance refresh to replace instances launched from the bad configuration."]
+      trigger:`Launch template/configuration (${type}) is planned for ${action==="replace"?"replacement":"destruction"}.${orderText}`,
+      impact:"The template itself stores instance configuration. Review potential workload and data impacts separately before replacing instances. The rollout risk: Auto Scaling groups referencing it will launch new instances with the new configuration, and a bad template surfaces only as instances cycle.",
+      verify:["Identify the Auto Scaling groups, fleets, and services that reference this template.","Confirm how the rollout happens (instance refresh, gradual replacement, or only new launches).","Canary or verify one instance with the new configuration before a full refresh."],
+      rollback:["If only a new version was created, point the ASG back to the previous version. If the entire template is being replaced or destroyed, the previous template and its versions may no longer exist \u2014 recreate the prior configuration from source control instead.","Re-point dependents if the template ID changed, then replace any instances launched from the unwanted configuration."]
     });
   }
 
@@ -524,17 +531,24 @@ function buildDependencies(plan, resources){
 // Fields relevant to our checks that are unknown until apply or masked as
 // sensitive. The analyzer must say so instead of silently treating them as absent.
 const WATCHED_FIELDS=["deletion_protection","skip_final_snapshot","backup_retention_period","snapshot_retention_limit","retention_in_days","desired_count","actions_enabled","internal","publicly_accessible","ingress","cidr_blocks","ipv6_cidr_blocks","cidr_ipv4","cidr_ipv6","policy","multi_az","storage_encrypted","encrypted","enable_logging","block_public_acls","block_public_policy","ignore_public_acls","restrict_public_buckets","rule","lifecycle_rule"];
+function unknownFields(obj){
+  if(!obj||typeof obj!=="object") return [];
+  const NOISE=new Set(["id","arn","tags_all","unique_id"]);
+  return Object.keys(obj).filter(f=>{
+    if(NOISE.has(f)) return false;
+    const v=obj[f];
+    return v===true||(v&&typeof v==="object"&&(Array.isArray(v)?v.some(x=>x===true||(x&&typeof x==="object"&&Object.keys(x).length)):Object.keys(v).length));
+  });
+}
 function unknownCaveats(resource){
   const caveats=[];
-  const flag=(obj,label)=>{
-    if(!obj||typeof obj!=="object") return;
-    WATCHED_FIELDS.forEach(f=>{
-      const v=obj[f];
-      if(v===true||(v&&typeof v==="object"&&Object.keys(v).length)) caveats.push(`${f} is ${label} \u2014 this check could not evaluate it; review at apply time.`);
-    });
-  };
-  flag(resource.afterUnknown,"not known until apply");
-  flag(resource.afterSensitive,"masked as sensitive");
+  unknownFields(resource.afterUnknown).forEach(f=>{
+    const watched=WATCHED_FIELDS.includes(f);
+    caveats.push(`${f} is not known until apply \u2014 ${watched?"the related checks could not evaluate its final value; review at apply time.":"its final value cannot be reviewed from this plan."}`);
+  });
+  unknownFields(resource.afterSensitive).forEach(f=>{
+    caveats.push(`${f} is masked as sensitive \u2014 its value cannot be reviewed from this plan.`);
+  });
   return [...new Set(caveats)];
 }
 
@@ -587,7 +601,10 @@ function analyze(plan){
 
   const questions=[...new Set(cards.flatMap(c=>c.verify).slice(0,3)),monitoringQuestion,ownerQuestion].slice(0,5);
   const dependencies=buildDependencies(plan, resources);
-  return {resources,cards,questions,dependencies,score:riskScore(cards),checks:CHECKS};
+  const unknowns=resources
+    .map(r=>({address:r.address,caveats:unknownCaveats(r)}))
+    .filter(u=>u.caveats.length);
+  return {resources,cards,questions,dependencies,unknowns,score:riskScore(cards),checks:CHECKS};
 }
 
 // --- Plan comparison --------------------------------------------------------
@@ -643,6 +660,17 @@ function toMarkdown(report,name,comparison,baseName){
     report.dependencies.unknown.forEach(a=>lines.push(`- \`${a}\``));
   }
   lines.push(``);
+  lines.push(`## Not evaluable from this plan`,``);
+  if(report.unknowns.length){
+    lines.push(`These field values are unknown until apply or masked as sensitive, so they could not be reviewed:`,``);
+    report.unknowns.forEach(u=>{
+      lines.push(`- \`${u.address}\``);
+      u.caveats.forEach(c=>lines.push(`  - ${c}`));
+    });
+  } else {
+    lines.push(`No unknown-until-apply or sensitive-masked fields were reported in this plan.`);
+  }
+  lines.push(``);
   if(comparison){
     lines.push(`## Comparison vs ${baseName}`,``,`Result is reported as *fewer detected risks*, not a guarantee of safety.`,``);
     lines.push(`**Resolved findings (${comparison.resolved.length}):**`);
@@ -657,6 +685,8 @@ function toMarkdown(report,name,comparison,baseName){
   }
   lines.push(`## Open review questions`,``);
   report.questions.forEach(q=>lines.push(`- [ ] ${q}`));
+  lines.push(``,`## Coverage \u2014 what this review checked`,``,`This analyzer runs a fixed set of deterministic checks. Anything outside this list was not examined:`,``);
+  report.checks.forEach(c=>lines.push(`- ${c}`));
   lines.push(``,`---`,`*Generated by BlastRadius. Deterministic review aid based on the plan file only; it cannot prove a change is safe.*`,``);
   return lines.join("\n");
 }
@@ -773,6 +803,15 @@ function render(plan,name,{asComparison=false}={}){
 
   const cov=$("coverage");
   if(cov) cov.replaceChildren(...report.checks.map(c=>node("li",null,c)));
+  const unk=$("plan-unknowns");
+  if(unk){
+    if(report.unknowns.length){
+      const items=report.unknowns.flatMap(u=>u.caveats.map(c=>`${u.address}: ${c}`));
+      unk.replaceChildren(node("p","dep-note","These field values are unknown until apply or masked as sensitive, so they could not be reviewed:"),list(items));
+    } else {
+      unk.replaceChildren(node("p","dep-note","No unknown-until-apply or sensitive-masked fields were reported in this plan."));
+    }
+  }
 
   $("questions").replaceChildren(...report.questions.map(q=>node("li",null,q)));
   $("resource-list").replaceChildren(...rs.map(r=>{const el=node("div","resource");el.append(node("code",null,r.address),node("span",`action ${r.action}`,r.action.toUpperCase()));return el;}));
