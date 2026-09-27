@@ -5,8 +5,8 @@ global.document={getElementById:()=>fakeEl(),createElement:()=>fakeEl()};
 global.URL={createObjectURL:()=>"blob:x",revokeObjectURL(){}};
 global.Blob=class{constructor(a){this.parts=a;}};
 const m={exports:{}};
-new Function("module","document","URL","Blob",src+"\nmodule.exports={analyze,samples};")(m,global.document,global.URL,global.Blob);
-const {analyze,samples}=m.exports;
+new Function("module","document","URL","Blob",src+"\nmodule.exports={analyze,samples,toMarkdown};")(m,global.document,global.URL,global.Blob);
+const {analyze,samples,toMarkdown}=m.exports;
 
 const fixture={
   format_version:"1.2",
@@ -44,7 +44,17 @@ const fixture={
     // 14) create-before-destroy replacement (LB)
     {address:"aws_lb.app",type:"aws_lb",change:{actions:["create","delete"],before:{internal:true},after:{internal:true}}},
     // 15) child module resource
-    {address:"module.net.aws_security_group.inner",type:"aws_security_group",change:{actions:["update"],before:{ingress:[]},after:{ingress:[]}}}
+    {address:"module.net.aws_security_group.inner",type:"aws_security_group",change:{actions:["update"],before:{ingress:[]},after:{ingress:[]}}},
+    // 16) Encryption disabled
+    {address:"aws_db_instance.enc",type:"aws_db_instance",change:{actions:["update"],before:{storage_encrypted:true},after:{storage_encrypted:false}}},
+    // 17) Multi-AZ disabled
+    {address:"aws_db_instance.ha",type:"aws_db_instance",change:{actions:["update"],before:{multi_az:true},after:{multi_az:false}}},
+    // 18) CloudTrail logging disabled
+    {address:"aws_cloudtrail.main",type:"aws_cloudtrail",change:{actions:["update"],before:{enable_logging:true},after:{enable_logging:false}}},
+    // 19) NAT gateway destroyed
+    {address:"aws_nat_gateway.a",type:"aws_nat_gateway",change:{actions:["delete"],before:{id:"nat-1"},after:null}},
+    // 20) Flagged resource with an unknown watched field (after_unknown) and a sensitive one
+    {address:"aws_db_instance.unknown",type:"aws_db_instance",change:{actions:["update"],before:{deletion_protection:true},after:{deletion_protection:false},after_unknown:{backup_retention_period:true},after_sensitive:{policy:true}}}
   ],
   configuration:{root_module:{
     resources:[{address:"aws_ecs_service.api",expressions:{network_configuration:{references:["module.net.aws_security_group.inner.id","module.net.aws_security_group.inner"]}}}],
@@ -79,6 +89,19 @@ T("Tag-only SG update suppressed", !card("aws_security_group.tags_only"));
 T("LB create-before-destroy order stated", /creates the replacement before destroying/.test((card("aws_lb.app")||{triggers:[]}).triggers.join(" ")));
 T("Honest wording: 'No exposure pattern was detected by the supported checks'", r.cards.some(c=>/No exposure pattern was detected by the supported checks/.test(c.triggers.join(" "))));
 T("Child-module dependency edge found", r.dependencies.edges.some(e=>e.from==="aws_ecs_service.api"&&e.to==="module.net.aws_security_group.inner"));
+
+// Tier 1+2 checks
+T("Encryption disabled flagged high", (card("aws_db_instance.enc")||{severity:""}).severity==="high" && /storage_encrypted changed true \u2192 false/.test(card("aws_db_instance.enc").triggers.join(" ")));
+T("Multi-AZ disabled flagged", /multi_az changed true \u2192 false/.test((card("aws_db_instance.ha")||{triggers:[]}).triggers.join(" ")));
+T("CloudTrail logging disabled flagged high", (card("aws_cloudtrail.main")||{severity:""}).severity==="high");
+T("NAT gateway destroy flagged", Boolean(card("aws_nat_gateway.a")));
+T("after_unknown caveat surfaced on flagged card", /backup_retention_period is not known until apply/.test((card("aws_db_instance.unknown")||{caveats:[]}).caveats.join(" ")));
+T("after_sensitive caveat surfaced on flagged card", /policy is masked as sensitive/.test((card("aws_db_instance.unknown")||{caveats:[]}).caveats.join(" ")));
+T("Risk score present and positive", typeof r.score==="number" && r.score>0 && r.score<=10);
+T("Coverage disclosure lists 12 checks", Array.isArray(r.checks) && r.checks.length===12);
+const md=toMarkdown(r,"fixture.json",null,"");
+T("Markdown includes risk score", /Risk score/.test(md));
+T("Markdown includes 'Not evaluable from this plan'", /Not evaluable from this plan/.test(md));
 
 // regression: shipped samples still behave
 const risky=analyze(samples.risky.plan), safe=analyze(samples.safe.plan);

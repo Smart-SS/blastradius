@@ -84,6 +84,10 @@ function replaceOrder(actions){
 const STATEFUL = /^(aws_db_|aws_rds_|aws_dynamodb_|aws_s3_bucket$|aws_ebs_|aws_elasticache_|aws_efs_|aws_redshift_)/;
 function isStateful(type){ return STATEFUL.test(type); }
 
+// Terraform plan JSON may render nested blocks as arrays or single objects.
+// Always normalize block reads through this helper.
+function asArray(x){ return Array.isArray(x)?x:x!==undefined&&x!==null?[x]:[]; }
+
 function portLabel(from,to){
   return from===undefined||from===null?"all ports":from===to?`port ${from}`:`ports ${from}-${to}`;
 }
@@ -110,8 +114,8 @@ function openIngress(type,value){
     if(value.cidr_ipv6==="::/0") evidence.push(`::/0 (IPv6) on ${ports}`);
     return evidence;
   }
-  // Inline rules on aws_security_group and similar
-  const rules=[...(Array.isArray(value.ingress)?value.ingress:[]),...(Array.isArray(value.ingress_with_cidr_blocks)?value.ingress_with_cidr_blocks:[])];
+  // Inline rules on aws_security_group and similar (blocks may be arrays or objects)
+  const rules=[...asArray(value.ingress),...asArray(value.ingress_with_cidr_blocks)];
   rules.forEach(addRule);
   return evidence;
 }
@@ -262,6 +266,52 @@ function evaluate(resource){
       });
     }
   });
+
+  // Encryption being disabled.
+  [["storage_encrypted","storage encryption"],["encrypted","encryption"]].forEach(([field,label])=>{
+    if(b[field]===true && a[field]===false){
+      fragments.push({
+        severity:"high",
+        trigger:`${field} changed true \u2192 false.`,
+        impact:`Data ${label} at rest is being turned off. For many resources this forces a replacement, and new data will be stored unencrypted.`,
+        verify:["Confirm disabling encryption is intentional \u2014 it rarely is.","Check compliance requirements (most mandate encryption at rest)."],
+        rollback:[`Re-enable ${field}; data written while unencrypted may need re-encryption or migration.`]
+      });
+    }
+  });
+
+  // High-availability downgrade.
+  if(b.multi_az===true && a.multi_az===false){
+    fragments.push({
+      severity:"medium",
+      trigger:"multi_az changed true \u2192 false.",
+      impact:"The database loses its standby replica. An availability-zone failure or maintenance event now means downtime instead of automatic failover.",
+      verify:["Confirm the availability trade-off is acceptable for this workload.","Check whether maintenance windows will now cause user-visible downtime."],
+      rollback:["Re-enable multi_az; conversion runs online but takes time to provision the standby."]
+    });
+  }
+
+  // Audit trail disabled.
+  if(/^aws_cloudtrail/.test(type) && b.enable_logging!==false && a.enable_logging===false){
+    fragments.push({
+      severity:"high",
+      trigger:"enable_logging changed to false on a CloudTrail trail.",
+      impact:"API activity stops being recorded. Security investigations and compliance audits lose visibility from the moment this applies.",
+      verify:["Confirm the logging pause is intentional and time-boxed.","Check whether another trail or organization trail still covers these events."],
+      rollback:["Re-enable logging; events during the gap are not recoverable."]
+    });
+  }
+
+  // Route / NAT removal severs connectivity.
+  if((/^aws_(route$|nat_gateway|internet_gateway)/.test(type)) && (action==="destroy")){
+    fragments.push({
+      severity:"medium",
+      trigger:`Connectivity resource (${type}) is being destroyed.`,
+      impact:"Traffic that depended on this route or gateway will fail after apply \u2014 typically outbound internet access or cross-network paths.",
+      verify:["Identify subnets and workloads that route through this resource.","Confirm an alternative path exists or the connectivity is genuinely unused."],
+      rollback:["Recreate the route/gateway; NAT gateways take several minutes to provision."]
+    });
+  }
 
   // Availability: service scaled to zero.
   if(typeof b.desired_count==="number" && a.desired_count===0 && b.desired_count>0){
@@ -471,11 +521,51 @@ function buildDependencies(plan, resources){
   };
 }
 
+// Fields relevant to our checks that are unknown until apply or masked as
+// sensitive. The analyzer must say so instead of silently treating them as absent.
+const WATCHED_FIELDS=["deletion_protection","skip_final_snapshot","backup_retention_period","snapshot_retention_limit","retention_in_days","desired_count","actions_enabled","internal","publicly_accessible","ingress","cidr_blocks","ipv6_cidr_blocks","cidr_ipv4","cidr_ipv6","policy","multi_az","storage_encrypted","encrypted","enable_logging","block_public_acls","block_public_policy","ignore_public_acls","restrict_public_buckets","rule","lifecycle_rule"];
+function unknownCaveats(resource){
+  const caveats=[];
+  const flag=(obj,label)=>{
+    if(!obj||typeof obj!=="object") return;
+    WATCHED_FIELDS.forEach(f=>{
+      const v=obj[f];
+      if(v===true||(v&&typeof v==="object"&&Object.keys(v).length)) caveats.push(`${f} is ${label} \u2014 this check could not evaluate it; review at apply time.`);
+    });
+  };
+  flag(resource.afterUnknown,"not known until apply");
+  flag(resource.afterSensitive,"masked as sensitive");
+  return [...new Set(caveats)];
+}
+
+// Coverage disclosure: exactly what this analyzer checks. Shown in the UI and
+// the exported brief so reviewers know what was NOT examined.
+const CHECKS=[
+  "Destroy / replace actions, with create-before-destroy vs destroy-before-create ordering",
+  "Stateful resources (RDS, S3, DynamoDB, EBS/EFS, ElastiCache, Redshift) with type-specific recovery guidance",
+  "deletion_protection and skip_final_snapshot changes",
+  "Backup/snapshot/log retention reductions (backup_retention_period, snapshot_retention_limit, retention_in_days)",
+  "Open ingress (0.0.0.0/0, ::/0) on inline and standalone security-group rules, IPv4 and IPv6",
+  "Load balancer scheme and publicly_accessible changes",
+  "S3 public access block weakening, anonymous-principal bucket policies, lifecycle expiration shortening",
+  "IAM wildcard grants (Action/Resource \"*\") and other IAM changes",
+  "Encryption disabled (storage_encrypted, encrypted), multi_az downgrade, CloudTrail logging disabled",
+  "ECS desired_count scaled to zero, CloudWatch alarm actions disabled",
+  "Route / NAT / internet gateway deletion",
+  "Fields unknown-until-apply or masked as sensitive are reported, not silently skipped"
+];
+
+// Severity-weighted risk score, 0-10. A communication aid, not a safety metric.
+function riskScore(cards){
+  const raw=cards.reduce((s,c)=>s+(c.severity==="high"?3:c.severity==="medium"?1:0.5),0);
+  return Math.min(10,Math.round(raw*10)/10);
+}
+
 function analyze(plan){
   if(!plan || !Array.isArray(plan.resource_changes)) throw new Error("This is not a Terraform JSON plan with resource_changes. Run terraform show -json tfplan > plan.json.");
   if(plan.resource_changes.length>10000) throw new Error("This plan is too large for the browser review (10,000 resource changes maximum).");
   const resources=plan.resource_changes
-    .map(item=>({address:String(item.address||"Unknown resource"),type:String(item.type||""),action:actionOf(item.change?.actions),rawActions:item.change?.actions,before:item.change?.before,after:item.change?.after}))
+    .map(item=>({address:String(item.address||"Unknown resource"),type:String(item.type||""),action:actionOf(item.change?.actions),rawActions:item.change?.actions,before:item.change?.before,after:item.change?.after,afterUnknown:item.change?.after_unknown,afterSensitive:item.change?.after_sensitive}))
     .filter(item=>item.action!=="no-op");
 
   const cards=[];
@@ -483,19 +573,21 @@ function analyze(plan){
     const fragments=evaluate(r);
     if(!fragments.length) return;
     const severity=fragments.reduce((s,f)=>SEV[f.severity]>SEV[s]?f.severity:s,"low");
+    const caveats=unknownCaveats(r);
     cards.push({
       address:r.address, type:r.type, action:r.action, severity,
       triggers:fragments.map(f=>f.trigger),
       impacts:[...new Set(fragments.map(f=>f.impact))],
       verify:[...new Set(fragments.flatMap(f=>f.verify))],
-      rollback:[...new Set(fragments.flatMap(f=>f.rollback))]
+      rollback:[...new Set(fragments.flatMap(f=>f.rollback))],
+      caveats
     });
   });
   cards.sort((x,y)=>SEV[y.severity]-SEV[x.severity]);
 
   const questions=[...new Set(cards.flatMap(c=>c.verify).slice(0,3)),monitoringQuestion,ownerQuestion].slice(0,5);
   const dependencies=buildDependencies(plan, resources);
-  return {resources,cards,questions,dependencies};
+  return {resources,cards,questions,dependencies,score:riskScore(cards),checks:CHECKS};
 }
 
 // --- Plan comparison --------------------------------------------------------
@@ -520,7 +612,8 @@ function toMarkdown(report,name,comparison,baseName){
   lines.push(`# BlastRadius review brief`,``,`**Plan:** ${name}`,`**Generated:** ${new Date().toISOString()}`,``);
   const counts={create:0,update:0,destroy:0,replace:0};
   report.resources.forEach(r=>{if(counts[r.action]!==undefined)counts[r.action]++;});
-  lines.push(`## Summary`,``,`| Changing | Create | Update | Destroy/Replace |`,`|---|---|---|---|`,`| ${report.resources.length} | ${counts.create} | ${counts.update} | ${counts.destroy+counts.replace} |`,``);
+  lines.push(`## Summary`,``,`| Changing | Create | Update | Destroy/Replace | Risk score |`,`|---|---|---|---|---|`,`| ${report.resources.length} | ${counts.create} | ${counts.update} | ${counts.destroy+counts.replace} | ${report.score}/10 |`,``);
+  lines.push(`*The risk score is a severity-weighted communication aid, not a safety metric.*`,``);
   lines.push(`## Flagged resources (${report.cards.length})`,``);
   if(!report.cards.length) lines.push(`No priority risk pattern detected. This does not prove the change is safe; review the full diff.`,``);
   report.cards.forEach(c=>{
@@ -529,6 +622,10 @@ function toMarkdown(report,name,comparison,baseName){
     c.triggers.forEach(t=>lines.push(`- ${t}`));
     lines.push(``,`**Likely impact:**`);
     c.impacts.forEach(t=>lines.push(`- ${t}`));
+    if(c.caveats && c.caveats.length){
+      lines.push(``,`**Not evaluable from this plan:**`);
+      c.caveats.forEach(t=>lines.push(`- ${t}`));
+    }
     lines.push(``,`**Verify before apply:**`);
     c.verify.forEach(t=>lines.push(`- [ ] ${t}`));
     lines.push(``,`**Rollback plan:**`);
@@ -587,6 +684,11 @@ function riskCard(card){
   rb.append(node("h4",null,"Rollback plan"),list(card.rollback));
   cols.append(v,rb);
   el.append(cols);
+  if(card.caveats&&card.caveats.length){
+    const cv=node("div","risk-block caveats");
+    cv.append(node("h4",null,"Not evaluable from this plan"),list(card.caveats));
+    el.append(cv);
+  }
   return el;
 }
 
@@ -653,7 +755,7 @@ function render(plan,name,{asComparison=false}={}){
   const copy=node("div");
   copy.append(
     node("b",null,highest==="high"?"High attention change":highest==="medium"?"Review recommended":"Standard review"),
-    node("p",null,highest==="high"?`${highCount} resource${highCount===1?"":"s"} could cause downtime, data loss, or exposure. Pause for a focused review before apply.`:highest==="medium"?"Some changes need a closer look before apply.":"No priority patterns detected. Still review the full diff before applying.")
+    node("p",null,(highest==="high"?`${highCount} resource${highCount===1?"":"s"} could cause downtime, data loss, or exposure. Pause for a focused review before apply.`:highest==="medium"?"Some changes need a closer look before apply.":"No priority patterns detected. Still review the full diff before applying.")+` Risk score: ${report.score}/10 (severity-weighted across supported checks).`)
   );
   verdict.append(copy);
 
@@ -668,6 +770,9 @@ function render(plan,name,{asComparison=false}={}){
 
   renderDependencies(report.dependencies);
   renderComparison(currentComparison,name);
+
+  const cov=$("coverage");
+  if(cov) cov.replaceChildren(...report.checks.map(c=>node("li",null,c)));
 
   $("questions").replaceChildren(...report.questions.map(q=>node("li",null,q)));
   $("resource-list").replaceChildren(...rs.map(r=>{const el=node("div","resource");el.append(node("code",null,r.address),node("span",`action ${r.action}`,r.action.toUpperCase()));return el;}));
