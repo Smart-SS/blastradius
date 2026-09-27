@@ -73,31 +73,55 @@ function actionOf(actions){
   if(actions.includes("update")) return "update";
   return "no-op";
 }
+// Terraform encodes replacement order in the action array order:
+// ["create","delete"] means create-before-destroy; ["delete","create"] the reverse.
+function replaceOrder(actions){
+  if(!Array.isArray(actions)) return null;
+  const ci=actions.indexOf("create"), di=actions.indexOf("delete");
+  if(ci===-1||di===-1) return null;
+  return ci<di ? "create_before_destroy" : "destroy_before_create";
+}
 const STATEFUL = /^(aws_db_|aws_rds_|aws_dynamodb_|aws_s3_bucket$|aws_ebs_|aws_elasticache_|aws_efs_|aws_redshift_)/;
 function isStateful(type){ return STATEFUL.test(type); }
 
-function openCidrs(value){
-  // Inspect recognized network fields only. Never serialize or show secrets.
-  if(!value || typeof value!=="object") return [];
-  const rules=[...(Array.isArray(value.ingress)?value.ingress:[]),...(Array.isArray(value.ingress_with_cidr_blocks)?value.ingress_with_cidr_blocks:[])];
-  const ports=[];
-  rules.forEach(rule=>{
-    const blocks=[...(Array.isArray(rule.cidr_blocks)?rule.cidr_blocks:[]),...(Array.isArray(rule.ipv6_cidr_blocks)?rule.ipv6_cidr_blocks:[])];
-    if(typeof rule.cidr_blocks==="string") blocks.push(rule.cidr_blocks);
-    if(blocks.includes("0.0.0.0/0")||blocks.includes("::/0")){
-      const from=rule.from_port, to=rule.to_port;
-      ports.push(from===undefined?"all ports":from===to?`port ${from}`:`ports ${from}-${to}`);
-    }
-  });
-  return ports;
+function portLabel(from,to){
+  return from===undefined||from===null?"all ports":from===to?`port ${from}`:`ports ${from}-${to}`;
 }
-function becamePublic(before,after){
+// Returns open-to-world evidence strings with the actual CIDR cited (IPv4 vs IPv6).
+function openIngress(type,value){
+  if(!value || typeof value!=="object") return [];
+  const evidence=[];
+  const addRule=(rule)=>{
+    const v4=[...(Array.isArray(rule.cidr_blocks)?rule.cidr_blocks:typeof rule.cidr_blocks==="string"?[rule.cidr_blocks]:[])];
+    const v6=[...(Array.isArray(rule.ipv6_cidr_blocks)?rule.ipv6_cidr_blocks:typeof rule.ipv6_cidr_blocks==="string"?[rule.ipv6_cidr_blocks]:[])];
+    const ports=portLabel(rule.from_port,rule.to_port);
+    if(v4.includes("0.0.0.0/0")) evidence.push(`0.0.0.0/0 (IPv4) on ${ports}`);
+    if(v6.includes("::/0")) evidence.push(`::/0 (IPv6) on ${ports}`);
+  };
+  // Standalone classic rule: aws_security_group_rule (only ingress matters here)
+  if(type==="aws_security_group_rule"){
+    if(value.type===undefined || value.type==="ingress") addRule(value);
+    return evidence;
+  }
+  // Standalone modern rule: aws_vpc_security_group_ingress_rule
+  if(type==="aws_vpc_security_group_ingress_rule"){
+    const ports=portLabel(value.from_port,value.to_port);
+    if(value.cidr_ipv4==="0.0.0.0/0") evidence.push(`0.0.0.0/0 (IPv4) on ${ports}`);
+    if(value.cidr_ipv6==="::/0") evidence.push(`::/0 (IPv6) on ${ports}`);
+    return evidence;
+  }
+  // Inline rules on aws_security_group and similar
+  const rules=[...(Array.isArray(value.ingress)?value.ingress:[]),...(Array.isArray(value.ingress_with_cidr_blocks)?value.ingress_with_cidr_blocks:[])];
+  rules.forEach(addRule);
+  return evidence;
+}
+function becamePublic(type,before,after){
   const b=before||{}, a=after||{};
   const signals=[];
   if(b.internal!==false && a.internal===false) signals.push("load balancer scheme changed internal \u2192 internet-facing");
   if(b.publicly_accessible!==true && a.publicly_accessible===true) signals.push("publicly_accessible changed false \u2192 true");
-  const newPorts=openCidrs(a).filter(p=>!openCidrs(b).includes(p));
-  if(newPorts.length) signals.push(`ingress opened to 0.0.0.0/0 on ${newPorts.join(", ")}`);
+  const beforeOpen=openIngress(type,b);
+  openIngress(type,a).filter(sig=>!beforeOpen.includes(sig)).forEach(sig=>signals.push(`ingress opened to ${sig}`));
   return signals;
 }
 
@@ -148,13 +172,27 @@ function statefulGuidance(type, action){
 const SEV = {high:3, medium:2, low:1};
 
 function evaluate(resource){
-  const {type, action, before, after} = resource;
+  const {type, action, before, after, rawActions} = resource;
   const fragments=[];
+  const b=before||{}, a=after||{};
+
+  // Tag-only updates: nothing but tags/tags_all changed. Suppress noise.
+  if(action==="update"){
+    const keys=new Set([...Object.keys(b),...Object.keys(a)]);
+    const changedKeys=[...keys].filter(k=>JSON.stringify(b[k])!==JSON.stringify(a[k]));
+    if(changedKeys.length && changedKeys.every(k=>k==="tags"||k==="tags_all")) return fragments;
+  }
 
   if(action==="replace"){
+    const order=replaceOrder(rawActions);
+    const orderText=order==="create_before_destroy"
+      ?"This plan creates the replacement before destroying the old resource (create-before-destroy), which reduces \u2014 but does not eliminate \u2014 downtime risk during cutover."
+      :order==="destroy_before_create"
+      ?"This plan destroys the existing resource before creating its replacement, so there is a window where the resource does not exist."
+      :"Replacement order could not be determined from this plan.";
     fragments.push({
       severity:"high",
-      trigger:"Action is replace \u2014 Terraform plans to recreate this resource. Unless create_before_destroy is set, the existing resource is destroyed before its replacement exists.",
+      trigger:`Action is replace \u2014 Terraform plans to recreate this resource. ${orderText}`,
       impact:"Depending on the resource and lifecycle configuration, expect possible downtime and loss of any state the resource holds. Dependents referencing its ID, ARN, or endpoint may break until the new resource is live.",
       verify:["Identify every resource and app config that references this resource's ID/ARN/endpoint.","Schedule a maintenance window if downtime is user-visible."],
       rollback:["Note that reverting the Terraform configuration restores the settings, not any data lost during replacement \u2014 data comes back only from backups.","First restore data from a backup/snapshot if the resource held state (see resource-specific guidance).","Then revert the Terraform change, re-apply, and re-point dependents if identifiers or endpoints changed."]
@@ -173,7 +211,6 @@ function evaluate(resource){
     fragments.push(Object.assign({severity:"high"}, statefulGuidance(type, action)));
   }
 
-  const b=before||{}, a=after||{};
   if(b.deletion_protection===true && a.deletion_protection===false){
     fragments.push({
       severity:"high",
@@ -193,35 +230,129 @@ function evaluate(resource){
     });
   }
 
+  // Backup / retention reductions (RDS, ElastiCache snapshots, log groups).
+  const retentionFields=[["backup_retention_period","automated backup retention"],["snapshot_retention_limit","snapshot retention"],["retention_in_days","log retention"]];
+  retentionFields.forEach(([field,label])=>{
+    const bv=b[field], av=a[field];
+    if(typeof bv==="number" && typeof av==="number" && av<bv){
+      fragments.push({
+        severity:av===0?"high":"medium",
+        trigger:`${field} reduced ${bv} \u2192 ${av}${av===0?" \u2014 "+label+" disabled":""}.`,
+        impact:av===0?`With ${label} disabled, recovery for this resource depends entirely on backups taken outside this configuration.`:`Shorter ${label} narrows the recovery window after an incident.`,
+        verify:[`Confirm the reduced ${label} still meets the recovery-point objective for this service.`,"Check whether any compliance requirement mandates the previous retention."],
+        rollback:[`Restore ${field} to ${bv}; note that history already aged out during the shorter window is not recovered.`]
+      });
+    }
+  });
+
+  // Availability: service scaled to zero.
+  if(typeof b.desired_count==="number" && a.desired_count===0 && b.desired_count>0){
+    fragments.push({
+      severity:"high",
+      trigger:`desired_count reduced ${b.desired_count} \u2192 0.`,
+      impact:"The service will run zero tasks after apply \u2014 an availability outage for anything it serves, even though the resource itself still exists.",
+      verify:["Confirm an intentional shutdown or migration is in progress.","Check what consumes this service and how it degrades."],
+      rollback:["Restore the previous desired_count and wait for tasks to become healthy."]
+    });
+  }
+
+  // Monitoring silenced.
+  if(b.actions_enabled!==false && a.actions_enabled===false && /^aws_cloudwatch_metric_alarm/.test(type)){
+    fragments.push({
+      severity:"medium",
+      trigger:"actions_enabled changed to false on a CloudWatch alarm.",
+      impact:"The alarm still evaluates but no longer notifies or triggers actions \u2014 a regression during rollout may go unnoticed.",
+      verify:["Confirm the silence is intentional and time-boxed (e.g., during a migration).","Ensure another alerting path covers this signal meanwhile."],
+      rollback:["Re-enable alarm actions immediately after the change window."]
+    });
+  }
+
+  // S3 public-access controls being disabled.
+  if(type==="aws_s3_bucket_public_access_block"){
+    const flags=["block_public_acls","block_public_policy","ignore_public_acls","restrict_public_buckets"];
+    const weakened=flags.filter(f=>b[f]===true && a[f]===false);
+    const removed=action==="destroy";
+    if(weakened.length||removed){
+      fragments.push({
+        severity:"high",
+        trigger:removed?"Public access block is being deleted from the bucket.":`Public access block weakened \u2014 ${weakened.map(f=>`${f} true \u2192 false`).join(", ")}.`,
+        impact:"The guardrail preventing public bucket ACLs/policies is being removed. Combined with a permissive policy, bucket contents could become publicly readable.",
+        verify:["Confirm the bucket policy and ACLs that will now take effect.","Verify no object in the bucket must remain private."],
+        rollback:["Re-enable all four public access block settings.","Audit access logs for anonymous reads during the exposure window."]
+      });
+    }
+  }
+
+  // Bucket policy granting anonymous access.
+  if(/^aws_s3_bucket_policy$/.test(type) && action!=="destroy"){
+    const anon=policyAllowsAnonymous(a.policy);
+    if(anon && !policyAllowsAnonymous(b.policy)){
+      fragments.push({
+        severity:"high",
+        trigger:`Bucket policy adds an Allow statement with Principal "*"${anon.actions?` for ${anon.actions}`:""}.`,
+        impact:"Anyone on the internet can perform the granted actions on matching objects once applied.",
+        verify:["Confirm anonymous access is intended (e.g., a public website bucket) and scoped to exactly the right prefix.","Check that no sensitive objects share this bucket."],
+        rollback:["Remove or scope the anonymous statement.","Audit S3 access logs for anonymous requests during the window."]
+      });
+    }
+  }
+
+  // S3 lifecycle expiration shortened.
+  if(/^aws_s3_bucket_lifecycle_configuration$/.test(type) && action!=="destroy"){
+    const days=cfg=>Array.isArray(cfg?.rule)?cfg.rule.map(r=>r?.expiration?.days).filter(d=>typeof d==="number"):[];
+    const bMin=Math.min(...days(b),Infinity), aMin=Math.min(...days(a),Infinity);
+    if(aMin<bMin && aMin!==Infinity){
+      fragments.push({
+        severity:"medium",
+        trigger:`Lifecycle expiration shortened \u2014 minimum expiration days ${bMin===Infinity?"unset":bMin} \u2192 ${aMin}.`,
+        impact:"Objects will be deleted sooner. Data older than the new window is removed on the next lifecycle run and is not recoverable without versioning or backups.",
+        verify:["Confirm the shorter retention meets audit and recovery requirements.","Check whether versioning or replication preserves expired objects."],
+        rollback:["Restore the previous expiration; objects already expired are not recovered."]
+      });
+    }
+  }
+
+  // Public exposure with accurate IPv4/IPv6 evidence, incl. standalone rules.
   if(["create","replace","update"].includes(action)){
-    const signals=becamePublic(before,after);
+    const signals=becamePublic(type,before,after);
     if(signals.length){
       fragments.push({
         severity:"high",
         trigger:`Gains public reachability \u2014 ${signals.join("; ")}.`,
         impact:"This resource may become reachable from the internet. Combined with weak auth it widens the attack surface immediately on apply.",
-        verify:["Confirm public exposure is intended for this resource.","Check that authentication, WAF, and least-privilege security groups are in place.","Scope CIDR ranges to known clients instead of 0.0.0.0/0 where possible."],
+        verify:["Confirm public exposure is intended for this resource.","Check that authentication, WAF, and least-privilege security groups are in place.","Scope CIDR ranges to known clients instead of 0.0.0.0/0 or ::/0 where possible."],
         rollback:["Revert the scheme/ingress change to restore private access.","Rotate anything that may have been exposed during the window."]
       });
     }
   }
 
   if(/^aws_iam_/.test(type) && action!=="destroy"){
-    fragments.push({
-      severity:"medium",
-      trigger:`IAM resource (${type}) is changing (${action}).`,
-      impact:"Permission or trust changes can silently over-grant access or break a workload that relied on the old policy.",
-      verify:["Diff the effective permissions and trust relationships against the previous policy.","Confirm the change follows least privilege; test the workload with the new policy in a non-production account if possible."],
-      rollback:["Re-apply the previous policy document from source control \u2014 IAM changes take effect quickly in both directions."]
-    });
+    const wild=policyWildcard(a.policy)||policyWildcard(a.assume_role_policy)||policyWildcard(a.inline_policy);
+    if(wild && !(policyWildcard(b.policy)||policyWildcard(b.assume_role_policy)||policyWildcard(b.inline_policy))){
+      fragments.push({
+        severity:"high",
+        trigger:`IAM policy expands to ${wild} \u2014 an administrative-scope grant.`,
+        impact:"Any principal with this policy can perform the wildcarded actions on the wildcarded resources. This is far broader than most workloads need.",
+        verify:["Replace wildcards with the specific actions and resource ARNs the workload uses.","If a wildcard is genuinely required, document why and add a permissions boundary or SCP guardrail."],
+        rollback:["Re-apply the previous policy document from source control \u2014 IAM changes take effect quickly in both directions."]
+      });
+    } else {
+      fragments.push({
+        severity:"medium",
+        trigger:`IAM resource (${type}) is changing (${action}). No wildcard grant was detected by the supported checks; review the full policy diff.`,
+        impact:"Permission or trust changes can silently over-grant access or break a workload that relied on the old policy.",
+        verify:["Diff the effective permissions and trust relationships against the previous policy.","Confirm the change follows least privilege; test the workload with the new policy in a non-production account if possible."],
+        rollback:["Re-apply the previous policy document from source control \u2014 IAM changes take effect quickly in both directions."]
+      });
+    }
   }
 
-  if(/^aws_(security_group|route|vpc|subnet|network_acl)/.test(type) && !becamePublic(before,after).length){
+  if(/^aws_(security_group|vpc_security_group|route|vpc|subnet|network_acl)/.test(type) && !becamePublic(type,before,after).length){
     fragments.push({
       severity:"medium",
-      trigger:`Network resource (${type}) is changing (${action}) without introducing public exposure.`,
-      impact:"This is a connectivity-review concern, not new internet exposure: traffic paths between services can still change, causing connectivity failures that only surface at runtime.",
-      verify:["Trace which services rely on the affected routes / rules.","Test connectivity from dependent services after apply."],
+      trigger:`Network resource (${type}) is changing (${action}). No exposure pattern was detected by the supported checks \u2014 this does not rule out exposure via fields the analyzer does not inspect.`,
+      impact:"This is a connectivity-review concern: traffic paths between services can change, causing connectivity failures that only surface at runtime.",
+      verify:["Trace which services rely on the affected routes / rules.","Review the raw diff for exposure in fields beyond inline/standalone ingress CIDRs.","Test connectivity from dependent services after apply."],
       rollback:["Restore the previous network configuration and re-test paths."]
     });
   }
@@ -229,31 +360,81 @@ function evaluate(resource){
   return fragments;
 }
 
+// Detect Allow statements with Principal "*" in an S3 bucket policy (string or object).
+function policyAllowsAnonymous(policy){
+  const doc=parsePolicy(policy);
+  if(!doc) return null;
+  const stmts=Array.isArray(doc.Statement)?doc.Statement:doc.Statement?[doc.Statement]:[];
+  for(const s of stmts){
+    const principal=s.Principal;
+    const anon=principal==="*"||(principal&&principal.AWS==="*");
+    if(s.Effect==="Allow"&&anon){
+      const actions=Array.isArray(s.Action)?s.Action.join(", "):s.Action;
+      return {actions};
+    }
+  }
+  return null;
+}
+// Detect Action:"*" together with Resource:"*" in an IAM policy document.
+function policyWildcard(policy){
+  const doc=parsePolicy(policy);
+  if(!doc) return null;
+  const stmts=Array.isArray(doc.Statement)?doc.Statement:doc.Statement?[doc.Statement]:[];
+  for(const s of stmts){
+    if(s.Effect!=="Allow") continue;
+    const acts=Array.isArray(s.Action)?s.Action:[s.Action];
+    const res=Array.isArray(s.Resource)?s.Resource:[s.Resource];
+    const actWild=acts.includes("*"), resWild=res.includes("*");
+    if(actWild&&resWild) return 'Action: "*" on Resource: "*"';
+    if(actWild) return 'Action: "*"';
+  }
+  return null;
+}
+function parsePolicy(policy){
+  if(!policy) return null;
+  if(typeof policy==="object") return policy;
+  if(typeof policy==="string"){ try{ return JSON.parse(policy); }catch(e){ return null; } }
+  return null;
+}
+
 // --- Dependency reference list ----------------------------------------------
-// Derived only from configuration references present in the supplied plan.
-// Anything the plan does not state is explicitly reported as unknown.
+// Derived only from configuration references present in the supplied plan,
+// including child modules. Module-relative references are qualified with the
+// module path so they match resource_changes addresses. Anything the plan
+// does not state is explicitly reported as unknown.
 function buildDependencies(plan, resources){
   const changed=new Set(resources.map(r=>r.address));
   const edges=[];
-  function walk(mod){
+  function qualify(prefix, ref){
+    // Trim index/attribute suffixes down to type.name (or module.X.type.name).
+    const parts=ref.split(".");
+    let base;
+    if(parts[0]==="module"&&parts.length>=4) base=parts.slice(0,4).join(".");
+    else if(parts[0]==="module") return null; // module output ref, not a resource
+    else if(parts[0]==="var"||parts[0]==="local"||parts[0]==="data"||parts[0]==="each"||parts[0]==="count") return null;
+    else base=parts.slice(0,2).join(".");
+    return prefix?`${prefix}.${base}`:base;
+  }
+  function walk(mod, prefix){
     (mod?.resources||[]).forEach(res=>{
-      const from=res.address;
+      const from=prefix?`${prefix}.${res.address}`:res.address;
       const refs=new Set();
       (function collect(expr){
         if(!expr || typeof expr!=="object") return;
         if(Array.isArray(expr)){ expr.forEach(collect); return; }
         if(Array.isArray(expr.references)) expr.references.forEach(ref=>{
-          const target=ref.split(".").slice(0,2).join(".");
+          const target=qualify(prefix, ref);
           if(target && target!==from) refs.add(target);
         });
         Object.values(expr).forEach(collect);
       })(res.expressions);
       refs.forEach(to=>edges.push({from,to}));
     });
-    // Module internals are out of scope for this view; anything inside
-    // module calls is reported as unknown rather than guessed.
+    Object.entries(mod?.module_calls||{}).forEach(([name,call])=>{
+      walk(call.module, prefix?`${prefix}.module.${name}`:`module.${name}`);
+    });
   }
-  walk(plan.configuration?.root_module);
+  walk(plan.configuration?.root_module, "");
   // Keep edges where at least one side is changing.
   const relevant=edges.filter(e=>changed.has(e.from)||changed.has(e.to));
   const known=new Set();
@@ -270,7 +451,7 @@ function analyze(plan){
   if(!plan || !Array.isArray(plan.resource_changes)) throw new Error("This is not a Terraform JSON plan with resource_changes. Run terraform show -json tfplan > plan.json.");
   if(plan.resource_changes.length>10000) throw new Error("This plan is too large for the browser review (10,000 resource changes maximum).");
   const resources=plan.resource_changes
-    .map(item=>({address:String(item.address||"Unknown resource"),type:String(item.type||""),action:actionOf(item.change?.actions),before:item.change?.before,after:item.change?.after}))
+    .map(item=>({address:String(item.address||"Unknown resource"),type:String(item.type||""),action:actionOf(item.change?.actions),rawActions:item.change?.actions,before:item.change?.before,after:item.change?.after}))
     .filter(item=>item.action!=="no-op");
 
   const cards=[];
