@@ -211,6 +211,18 @@ function evaluate(resource){
     fragments.push(Object.assign({severity:"high"}, statefulGuidance(type, action)));
   }
 
+  // Launch templates are configuration, not data: recovery is about the
+  // previous template version and dependent Auto Scaling groups, not backups.
+  if(/^aws_launch_(template|configuration)$/.test(type) && (action==="replace"||action==="destroy")){
+    fragments.push({
+      severity:"medium",
+      trigger:`Launch template/configuration (${type}) is planned for ${action==="replace"?"replacement":"destruction"}.`,
+      impact:"No data is at risk \u2014 this is instance configuration. The risk is rollout: Auto Scaling groups referencing it will launch new instances with the new configuration, and a bad template surfaces only as instances cycle.",
+      verify:["Identify the Auto Scaling groups and services that reference this template.","Confirm how the rollout happens (instance refresh, gradual replacement, or only new launches).","Canary or verify one instance with the new configuration before a full refresh."],
+      rollback:["Point the ASG back to the previous template version (versions are retained unless explicitly deleted).","Trigger an instance refresh to replace instances launched from the bad configuration."]
+    });
+  }
+
   if(b.deletion_protection===true && a.deletion_protection===false){
     fragments.push({
       severity:"high",
@@ -231,15 +243,21 @@ function evaluate(resource){
   }
 
   // Backup / retention reductions (RDS, ElastiCache snapshots, log groups).
-  const retentionFields=[["backup_retention_period","automated backup retention"],["snapshot_retention_limit","snapshot retention"],["retention_in_days","log retention"]];
-  retentionFields.forEach(([field,label])=>{
+  const retentionFields=[["backup_retention_period","automated backup retention","recovery"],["snapshot_retention_limit","snapshot retention","recovery"],["retention_in_days","log retention","history"]];
+  retentionFields.forEach(([field,label,kind])=>{
     const bv=b[field], av=a[field];
     if(typeof bv==="number" && typeof av==="number" && av<bv){
+      const narrowImpact=kind==="history"
+        ?`Shorter ${label} shortens the investigation and audit history available after an incident.`
+        :`Shorter ${label} narrows the recovery window after an incident.`;
+      const zeroImpact=kind==="history"
+        ?`With ${label} disabled, no history is retained for investigation or audit beyond what is exported elsewhere.`
+        :`With ${label} disabled, recovery for this resource depends entirely on backups taken outside this configuration.`;
       fragments.push({
         severity:av===0?"high":"medium",
         trigger:`${field} reduced ${bv} \u2192 ${av}${av===0?" \u2014 "+label+" disabled":""}.`,
-        impact:av===0?`With ${label} disabled, recovery for this resource depends entirely on backups taken outside this configuration.`:`Shorter ${label} narrows the recovery window after an incident.`,
-        verify:[`Confirm the reduced ${label} still meets the recovery-point objective for this service.`,"Check whether any compliance requirement mandates the previous retention."],
+        impact:av===0?zeroImpact:narrowImpact,
+        verify:[kind==="history"?`Confirm the reduced ${label} still meets incident-investigation and audit requirements.`:`Confirm the reduced ${label} still meets the recovery-point objective for this service.`,"Check whether any compliance requirement mandates the previous retention."],
         rollback:[`Restore ${field} to ${bv}; note that history already aged out during the shorter window is not recovered.`]
       });
     }
@@ -290,16 +308,22 @@ function evaluate(resource){
       fragments.push({
         severity:"high",
         trigger:`Bucket policy adds an Allow statement with Principal "*"${anon.actions?` for ${anon.actions}`:""}.`,
-        impact:"Anyone on the internet can perform the granted actions on matching objects once applied.",
+        impact:"This statement would permit anonymous requests for the granted actions on matching objects. Whether requests actually succeed also depends on the bucket's public access block, ACLs, and any deny statements.",
         verify:["Confirm anonymous access is intended (e.g., a public website bucket) and scoped to exactly the right prefix.","Check that no sensitive objects share this bucket."],
         rollback:["Remove or scope the anonymous statement.","Audit S3 access logs for anonymous requests during the window."]
       });
     }
   }
 
-  // S3 lifecycle expiration shortened.
-  if(/^aws_s3_bucket_lifecycle_configuration$/.test(type) && action!=="destroy"){
-    const days=cfg=>Array.isArray(cfg?.rule)?cfg.rule.map(r=>r?.expiration?.days).filter(d=>typeof d==="number"):[];
+  // S3 lifecycle expiration shortened. Terraform plan JSON may render `rule`
+  // and `expiration` as arrays or single objects; handle both, plus the
+  // legacy inline `lifecycle_rule` on aws_s3_bucket.
+  if(/^(aws_s3_bucket_lifecycle_configuration|aws_s3_bucket)$/.test(type) && action!=="destroy"){
+    const asArray=x=>Array.isArray(x)?x:x?[x]:[];
+    const days=cfg=>[...asArray(cfg?.rule),...asArray(cfg?.lifecycle_rule)]
+      .flatMap(r=>asArray(r?.expiration))
+      .map(e=>e?.days)
+      .filter(d=>typeof d==="number"&&d>0);
     const bMin=Math.min(...days(b),Infinity), aMin=Math.min(...days(a),Infinity);
     if(aMin<bMin && aMin!==Infinity){
       fragments.push({
@@ -318,8 +342,8 @@ function evaluate(resource){
     if(signals.length){
       fragments.push({
         severity:"high",
-        trigger:`Gains public reachability \u2014 ${signals.join("; ")}.`,
-        impact:"This resource may become reachable from the internet. Combined with weak auth it widens the attack surface immediately on apply.",
+        trigger:`Access scope widens \u2014 ${signals.join("; ")}.`,
+        impact:"This change permits broader access than before. Actual internet reachability also depends on routing, NACLs, other security groups, and whether the resource has a public address \u2014 but the permissive setting takes effect immediately on apply.",
         verify:["Confirm public exposure is intended for this resource.","Check that authentication, WAF, and least-privilege security groups are in place.","Scope CIDR ranges to known clients instead of 0.0.0.0/0 or ::/0 where possible."],
         rollback:["Revert the scheme/ingress change to restore private access.","Rotate anything that may have been exposed during the window."]
       });
@@ -332,7 +356,7 @@ function evaluate(resource){
       fragments.push({
         severity:"high",
         trigger:`IAM policy expands to ${wild} \u2014 an administrative-scope grant.`,
-        impact:"Any principal with this policy can perform the wildcarded actions on the wildcarded resources. This is far broader than most workloads need.",
+        impact:"Principals attached to this policy would be granted the wildcarded actions on the wildcarded resources \u2014 far broader than most workloads need. Actual effective access also depends on permissions boundaries, SCPs, and explicit denies.",
         verify:["Replace wildcards with the specific actions and resource ARNs the workload uses.","If a wildcard is genuinely required, document why and add a permissions boundary or SCP guardrail."],
         rollback:["Re-apply the previous policy document from source control \u2014 IAM changes take effect quickly in both directions."]
       });

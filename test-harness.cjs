@@ -23,8 +23,12 @@ const fixture={
     {address:"aws_s3_bucket_public_access_block.site",type:"aws_s3_bucket_public_access_block",change:{actions:["update"],before:{block_public_acls:true,block_public_policy:true,ignore_public_acls:true,restrict_public_buckets:true},after:{block_public_acls:false,block_public_policy:false,ignore_public_acls:true,restrict_public_buckets:true}}},
     // 6) Anonymous-read bucket policy
     {address:"aws_s3_bucket_policy.site",type:"aws_s3_bucket_policy",change:{actions:["update"],before:{policy:'{"Version":"2012-10-17","Statement":[]}'},after:{policy:'{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::site/*"}]}'}}},
-    // 7) Lifecycle retention 365 -> 7
-    {address:"aws_s3_bucket_lifecycle_configuration.logs",type:"aws_s3_bucket_lifecycle_configuration",change:{actions:["update"],before:{rule:[{expiration:{days:365}}]},after:{rule:[{expiration:{days:7}}]}}},
+    // 7) Lifecycle retention 365 -> 7 (array-shaped, as real plan JSON renders blocks)
+    {address:"aws_s3_bucket_lifecycle_configuration.logs",type:"aws_s3_bucket_lifecycle_configuration",change:{actions:["update"],before:{rule:[{expiration:[{days:365}]}]},after:{rule:[{expiration:[{days:7}]}]}}},
+    // 7b) Object-shaped lifecycle still works
+    {address:"aws_s3_bucket_lifecycle_configuration.obj",type:"aws_s3_bucket_lifecycle_configuration",change:{actions:["update"],before:{rule:{expiration:{days:90}}},after:{rule:{expiration:{days:3}}}}},
+    // 7c) Launch template replacement (create-before-destroy)
+    {address:"aws_launch_template.app",type:"aws_launch_template",change:{actions:["create","delete"],before:{instance_type:"m5.large"},after:{instance_type:"m6.large"}}},
     // 8) IAM wildcard expansion
     {address:"aws_iam_role_policy.app",type:"aws_iam_role_policy",change:{actions:["update"],before:{policy:'{"Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::x/*"}]}'},after:{policy:'{"Statement":[{"Effect":"Allow","Action":"*","Resource":"*"}]}'}}},
     // 9) ECS scale to zero
@@ -59,7 +63,13 @@ T("Standalone modern rule: IPv6 SSH flagged", /::\/0 \(IPv6\) on port 22/.test((
 T("Inline IPv6: cited as ::/0 (IPv6), not IPv4", /::\/0 \(IPv6\) on port 22/.test(card("aws_security_group.app").triggers.join(" ")) && !/0\.0\.0\.0/.test(card("aws_security_group.app").triggers.join(" ")));
 T("S3 public access block weakening flagged", /block_public_acls true \u2192 false/.test((card("aws_s3_bucket_public_access_block.site")||{triggers:[]}).triggers.join(" ")));
 T("Anonymous bucket policy flagged", /Principal "\*"/.test((card("aws_s3_bucket_policy.site")||{triggers:[]}).triggers.join(" ")));
-T("Lifecycle 365->7 flagged", /365 \u2192 7/.test((card("aws_s3_bucket_lifecycle_configuration.logs")||{triggers:[]}).triggers.join(" ")));
+T("Lifecycle 365->7 flagged (array-shaped)", /365 \u2192 7/.test((card("aws_s3_bucket_lifecycle_configuration.logs")||{triggers:[]}).triggers.join(" ")));
+T("Lifecycle 90->3 flagged (object-shaped)", /90 \u2192 3/.test((card("aws_s3_bucket_lifecycle_configuration.obj")||{triggers:[]}).triggers.join(" ")));
+T("Launch template: template-specific guidance (versions/ASG), no backup advice", (()=>{const c=card("aws_launch_template.app");if(!c)return false;const all=c.verify.join(" ")+c.rollback.join(" ")+c.impacts.join(" ");return /previous template version/.test(all)&&/Auto Scaling/.test(all)&&!/snapshot or backup|PITR/.test(all);})());
+T("Anonymous policy wording acknowledges other controls", /also depends on the bucket's public access block/.test((card("aws_s3_bucket_policy.site")||{impacts:[]}).impacts.join(" ")));
+T("IAM wildcard wording acknowledges boundaries/SCPs", /permissions boundaries, SCPs/.test((card("aws_iam_role_policy.app")||{impacts:[]}).impacts.join(" ")));
+T("Ingress wording: permissive rule, reachability not asserted", /Actual internet reachability also depends/.test((card("aws_security_group_rule.pg_world")||{impacts:[]}).impacts.join(" ")));
+T("Log retention wording: investigation/audit history, not recovery", /investigation and audit history/.test((card("aws_cloudwatch_log_group.app")||{impacts:[]}).impacts.join(" ")) && !/recovery window/.test((card("aws_cloudwatch_log_group.app")||{impacts:[]}).impacts.join(" ")));
 T("IAM wildcard Action*/Resource* flagged high", (card("aws_iam_role_policy.app")||{severity:""}).severity==="high" && /Action: "\*" on Resource: "\*"/.test(card("aws_iam_role_policy.app").triggers.join(" ")));
 T("ECS desired_count->0 flagged high", /desired_count reduced 4 \u2192 0/.test((card("aws_ecs_service.api")||{triggers:[]}).triggers.join(" ")));
 T("Alarm actions_enabled=false flagged", /actions_enabled changed to false/.test((card("aws_cloudwatch_metric_alarm.errors")||{triggers:[]}).triggers.join(" ")));
