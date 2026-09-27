@@ -5,7 +5,7 @@ const $ = id => document.getElementById(id);
 // --- Demo plans -------------------------------------------------------------
 // Three plans tell one story: a risky agent-proposed change, the engineer's
 // revised version, and a routine safe deploy. Each includes a configuration
-// block so the dependency map can be derived from real references.
+// block so the dependency reference list can be derived from real references.
 const samples = {
   safe: {
     label: "Sample: routine web tier deploy",
@@ -157,7 +157,7 @@ function evaluate(resource){
       trigger:"Action is replace \u2014 Terraform plans to recreate this resource. Unless create_before_destroy is set, the existing resource is destroyed before its replacement exists.",
       impact:"Depending on the resource and lifecycle configuration, expect possible downtime and loss of any state the resource holds. Dependents referencing its ID, ARN, or endpoint may break until the new resource is live.",
       verify:["Identify every resource and app config that references this resource's ID/ARN/endpoint.","Schedule a maintenance window if downtime is user-visible."],
-      rollback:["Revert the Terraform change and re-apply the previous configuration.","Re-point dependents if identifiers changed."]
+      rollback:["Note that reverting the Terraform configuration restores the settings, not any data lost during replacement \u2014 data comes back only from backups.","First restore data from a backup/snapshot if the resource held state (see resource-specific guidance).","Then revert the Terraform change, re-apply, and re-point dependents if identifiers or endpoints changed."]
     });
   } else if(action==="destroy"){
     fragments.push({
@@ -219,8 +219,8 @@ function evaluate(resource){
   if(/^aws_(security_group|route|vpc|subnet|network_acl)/.test(type) && !becamePublic(before,after).length){
     fragments.push({
       severity:"medium",
-      trigger:`Network resource (${type}) is changing (${action}).`,
-      impact:"Traffic paths between services can change, causing connectivity failures that only surface at runtime.",
+      trigger:`Network resource (${type}) is changing (${action}) without introducing public exposure.`,
+      impact:"This is a connectivity-review concern, not new internet exposure: traffic paths between services can still change, causing connectivity failures that only surface at runtime.",
       verify:["Trace which services rely on the affected routes / rules.","Test connectivity from dependent services after apply."],
       rollback:["Restore the previous network configuration and re-test paths."]
     });
@@ -229,7 +229,7 @@ function evaluate(resource){
   return fragments;
 }
 
-// --- Dependency map ---------------------------------------------------------
+// --- Dependency reference list ----------------------------------------------
 // Derived only from configuration references present in the supplied plan.
 // Anything the plan does not state is explicitly reported as unknown.
 function buildDependencies(plan, resources){

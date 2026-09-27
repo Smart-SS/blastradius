@@ -1,6 +1,6 @@
 # BlastRadius
 
-An original, browser-based Terraform change review app for the AWS Zero to Shipped 2026 challenge. It turns a `terraform show -json` plan into a risk brief built on one promise: *show the evidence behind a risky change, and show what remains unknown.* For each risky resource it shows the exact triggering change, the likely impact, and resource-specific verify/rollback checks; a dependency map derived only from actual plan references (with unknowns labeled honestly); a risky-vs-revised comparison reported as fewer detected risks; and an exportable Markdown review brief for pull requests. Plans are read only in the browser; the app makes no network requests for plan content.
+An original, browser-based Terraform change review app for the AWS Zero to Shipped 2026 challenge. It turns a `terraform show -json` plan into a risk brief built on one promise: *show the evidence behind a risky change, and show what remains unknown.* For each risky resource it shows the exact triggering change, the likely impact, and resource-specific verify/rollback checks; a dependency reference list derived only from actual plan references (with unknowns labeled honestly); a risky-vs-revised comparison reported as fewer detected risks; and an exportable Markdown review brief for pull requests. Plans are read only in the browser; the app makes no network requests for plan content.
 
 ## Run locally
 
