@@ -316,7 +316,7 @@ function toMarkdown(report,name,comparison,baseName){
   const counts={create:0,update:0,destroy:0,replace:0};
   report.resources.forEach(r=>{if(counts[r.action]!==undefined)counts[r.action]++;});
   lines.push(`## Summary`,``,`| Changing | Create | Update | Destroy/Replace |`,`|---|---|---|---|`,`| ${report.resources.length} | ${counts.create} | ${counts.update} | ${counts.destroy+counts.replace} |`,``);
-  lines.push(`## Findings (${report.cards.length})`,``);
+  lines.push(`## Flagged resources (${report.cards.length})`,``);
   if(!report.cards.length) lines.push(`No priority risk pattern detected. This does not prove the change is safe; review the full diff.`,``);
   report.cards.forEach(c=>{
     lines.push(`### ${c.severity.toUpperCase()} \u2014 \`${c.address}\` (${c.action})`,``);
@@ -452,7 +452,7 @@ function render(plan,name,{asComparison=false}={}){
   );
   verdict.append(copy);
 
-  $("risk-count").textContent=report.cards.length?`${report.cards.length} flagged`:"none flagged";
+  $("risk-count").textContent=report.cards.length?`${report.cards.length} resource${report.cards.length===1?"":"s"} flagged`:"no resources flagged";
   if(report.cards.length){
     $("risk-cards").replaceChildren(...report.cards.map(riskCard));
   }else{
