@@ -58,9 +58,13 @@ const fixture={
     // 21) Un-flagged resources with unknown non-watched fields (endpoint, environment)
     {address:"aws_db_instance.endpoint_unknown",type:"aws_db_instance",change:{actions:["update"],before:{instance_class:"db.t3.micro"},after:{instance_class:"db.t3.small"},after_unknown:{endpoint:true}}},
     {address:"aws_lambda_function.env",type:"aws_lambda_function",change:{actions:["update"],before:{memory_size:128},after:{memory_size:256},after_sensitive:{environment:[{variables:true}]}}},
-    // 22) KNOWN sensitive value: policy present in after, marked sensitive, contains a secret marker.
-    // Must be analyzed (anonymous principal flagged) but the secret must not appear in output.
-    {address:"aws_s3_bucket_policy.sensitive",type:"aws_s3_bucket_policy",change:{actions:["update"],before:{policy:'{"Version":"2012-10-17","Statement":[]}'},after:{policy:'{"Version":"2012-10-17","Statement":[{"Sid":"SECRET_MARKER_XYZ","Effect":"Allow","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::sens/*"}]}'},after_sensitive:{policy:true}}}
+    // 22) KNOWN sensitive value: policy present in after, marked sensitive.
+    // The distinctive action s3:GetObjectVersion sits in the Action field the old
+    // trigger echoed (anon.actions); the Sid marker guards other paths.
+    // Must be analyzed (anonymous principal flagged) but neither may appear in output.
+    {address:"aws_s3_bucket_policy.sensitive",type:"aws_s3_bucket_policy",change:{actions:["update"],before:{policy:'{"Version":"2012-10-17","Statement":[]}'},after:{policy:'{"Version":"2012-10-17","Statement":[{"Sid":"SECRET_MARKER_XYZ","Effect":"Allow","Principal":"*","Action":"s3:GetObjectVersion","Resource":"arn:aws:s3:::sens/*"}]}'},after_sensitive:{policy:true}}},
+    // 23) Sensitive retention value: analyzed, flagged, value redacted.
+    {address:"aws_db_instance.sens_retention",type:"aws_db_instance",change:{actions:["update"],before:{backup_retention_period:31},after:{backup_retention_period:2},after_sensitive:{backup_retention_period:true}}}
   ],
   configuration:{root_module:{
     resources:[{address:"aws_ecs_service.api",expressions:{network_configuration:{references:["module.net.aws_security_group.inner.id","module.net.aws_security_group.inner"]}}}],
@@ -114,8 +118,10 @@ T("Plan-level unknowns include sensitive lambda environment (absent value)", r.u
 T("Markdown lists plan-level unknowns (endpoint, environment)", /aws_db_instance\.endpoint_unknown/.test(md) && /environment is marked sensitive/.test(md));
 T("Known sensitive policy is still analyzed (anonymous principal flagged)", (()=>{const c=card("aws_s3_bucket_policy.sensitive");return c && c.triggers.some(t=>/Principal "\*"/.test(t));})());
 T("Known sensitive policy: caveat says analyzed but redacted from report", /analyzed by the supported checks, but it is not shown in this report/.test((card("aws_s3_bucket_policy.sensitive")||{caveats:[]}).caveats.join(" ")));
-T("Redaction: sensitive policy contents not repeated in card or Markdown", (()=>{const c=card("aws_s3_bucket_policy.sensitive");if(!c)return false;const all=JSON.stringify(c)+md;return !all.includes("SECRET_MARKER_XYZ") && !/for s3:GetObject.*sensitive/.test(c.triggers.join(" "));})());
+T("Redaction: action text absent from card and Markdown (echoed field)", (()=>{const c=card("aws_s3_bucket_policy.sensitive");if(!c)return false;const all=JSON.stringify(c)+md;return !all.includes("s3:GetObjectVersion")&&!all.includes("SECRET_MARKER_XYZ");})());
 T("Redaction note appears on sensitive-policy trigger", /marked sensitive, so its contents are not repeated/.test((card("aws_s3_bucket_policy.sensitive")||{triggers:[]}).triggers.join(" ")));
+T("Sensitive retention: finding fires with values redacted", (()=>{const c=card("aws_db_instance.sens_retention");if(!c)return false;const all=JSON.stringify(c)+md;return c.triggers.some(t=>/backup_retention_period reduced \[sensitive\] \u2192 \[sensitive\]/.test(t)) && !/31/.test(JSON.stringify(c.triggers)+JSON.stringify(c.rollback));})());
+T("Non-sensitive retention values still shown", /backup_retention_period reduced 14 \u2192 0/.test((card("aws_db_instance.main")||{triggers:[]}).triggers.join(" ")));
 T("Launch template: workload/data impact wording, no absolute 'No data is at risk'", (()=>{const c=card("aws_launch_template.app");if(!c)return false;const all=c.impacts.join(" ");return /Review potential workload and data impacts separately/.test(all)&&!/No data is at risk/.test(all);})());
 T("Launch template rollback distinguishes version vs whole-template, no availability assumption", (()=>{const c=card("aws_launch_template.app");if(!c)return false;const rb=c.rollback.join(" ");return /If only a new version was created/.test(rb)&&/may no longer exist/.test(rb)&&!/versions are retained/.test(rb);})());
 T("Launch template replace: no generic snapshot/backup rollback", !/backup\/snapshot|data comes back only from backups/.test((card("aws_launch_template.app")||{rollback:[]}).rollback.join(" ")));

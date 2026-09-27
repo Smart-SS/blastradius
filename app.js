@@ -181,6 +181,10 @@ function evaluate(resource){
   const b=before||{}, a=after||{};
   const sens=resource.afterSensitive&&typeof resource.afterSensitive==="object"?resource.afterSensitive:{};
   const isSensitive=f=>Boolean(sens[f]);
+  // Every trigger/rollback string that echoes a field VALUE must pass it
+  // through sv(): sensitive-marked values are analyzed but never repeated
+  // in report output.
+  const sv=(field,value)=>isSensitive(field)?"[sensitive]":value;
 
   // Tag-only updates: nothing but tags/tags_all changed. Suppress noise.
   if(action==="update"){
@@ -268,10 +272,10 @@ function evaluate(resource){
         :`With ${label} disabled, recovery for this resource depends entirely on backups taken outside this configuration.`;
       fragments.push({
         severity:av===0?"high":"medium",
-        trigger:`${field} reduced ${bv} \u2192 ${av}${av===0?" \u2014 "+label+" disabled":""}.`,
+        trigger:`${field} reduced ${sv(field,bv)} \u2192 ${sv(field,av)}${av===0?" \u2014 "+label+" disabled":""}.`,
         impact:av===0?zeroImpact:narrowImpact,
         verify:[kind==="history"?`Confirm the reduced ${label} still meets incident-investigation and audit requirements.`:`Confirm the reduced ${label} still meets the recovery-point objective for this service.`,"Check whether any compliance requirement mandates the previous retention."],
-        rollback:[`Restore ${field} to ${bv}; note that history already aged out during the shorter window is not recovered.`]
+        rollback:[`Restore ${field} to ${sv(field,bv)}; note that history already aged out during the shorter window is not recovered.`]
       });
     }
   });
@@ -326,7 +330,7 @@ function evaluate(resource){
   if(typeof b.desired_count==="number" && a.desired_count===0 && b.desired_count>0){
     fragments.push({
       severity:"high",
-      trigger:`desired_count reduced ${b.desired_count} \u2192 0.`,
+      trigger:`desired_count reduced ${sv("desired_count",b.desired_count)} \u2192 0.`,
       impact:"The service will run zero tasks after apply \u2014 an availability outage for anything it serves, even though the resource itself still exists.",
       verify:["Confirm an intentional shutdown or migration is in progress.","Check what consumes this service and how it degrades."],
       rollback:["Restore the previous desired_count and wait for tasks to become healthy."]
@@ -385,9 +389,12 @@ function evaluate(resource){
       .filter(d=>typeof d==="number"&&d>0);
     const bMin=Math.min(...days(b),Infinity), aMin=Math.min(...days(a),Infinity);
     if(aMin<bMin && aMin!==Infinity){
+      const ruleSensitive=isSensitive("rule")||isSensitive("lifecycle_rule");
       fragments.push({
         severity:"medium",
-        trigger:`Lifecycle expiration shortened \u2014 minimum expiration days ${bMin===Infinity?"unset":bMin} \u2192 ${aMin}.`,
+        trigger:ruleSensitive
+          ?"Lifecycle expiration shortened. The lifecycle rules are marked sensitive, so the values are not repeated in this report."
+          :`Lifecycle expiration shortened \u2014 minimum expiration days ${bMin===Infinity?"unset":bMin} \u2192 ${aMin}.`,
         impact:"Objects will be deleted sooner. Data older than the new window is removed on the next lifecycle run and is not recoverable without versioning or backups.",
         verify:["Confirm the shorter retention meets audit and recovery requirements.","Check whether versioning or replication preserves expired objects."],
         rollback:["Restore the previous expiration; objects already expired are not recovered."]
@@ -399,9 +406,12 @@ function evaluate(resource){
   if(["create","replace","update"].includes(action)){
     const signals=becamePublic(type,before,after);
     if(signals.length){
+      const ingressSensitive=["ingress","cidr_blocks","ipv6_cidr_blocks","cidr_ipv4","cidr_ipv6"].some(isSensitive);
       fragments.push({
         severity:"high",
-        trigger:`Access scope widens \u2014 ${signals.join("; ")}.`,
+        trigger:ingressSensitive
+          ?"Access scope widens \u2014 a rule permitting all-source access was detected. The rule fields are marked sensitive, so their values are not repeated in this report."
+          :`Access scope widens \u2014 ${signals.join("; ")}.`,
         impact:"This change permits broader access than before. Actual internet reachability also depends on routing, NACLs, other security groups, and whether the resource has a public address \u2014 but the permissive setting takes effect immediately on apply.",
         verify:["Confirm public exposure is intended for this resource.","Check that authentication, WAF, and least-privilege security groups are in place.","Scope CIDR ranges to known clients instead of 0.0.0.0/0 or ::/0 where possible."],
         rollback:["Revert the scheme/ingress change to restore private access.","Rotate anything that may have been exposed during the window."]
