@@ -16,7 +16,9 @@ Terraform plans can be long and difficult to scan under time pressure. A destruc
 
 ## What the app does
 
-Export a Terraform plan as JSON, open BlastRadius, and load the file. It runs locally in the browser. Instead of a flat list of warnings, it answers one memorable question: **"What could break if I apply this plan?"** For each risky resource it shows the exact change that triggered the finding (for example `deletion_protection` true → false, or ingress opened to `0.0.0.0/0`), the likely service impact, and a concrete verify-before-apply and rollback checklist. Two sample plans ship with the app: a routine safe deploy and a dangerous change that combines a database replacement with newly public access — so the before-and-after story is clear in minutes without touching real infrastructure.
+Export a Terraform plan as JSON, open BlastRadius, and load the file. It runs locally in the browser, built on one promise: **show the evidence behind a risky change, and show what remains unknown.** For each risky resource it shows the exact change that triggered the finding (for example `deletion_protection` true → false, or ingress opened to `0.0.0.0/0`), the likely impact, and **resource-specific** recovery checks — database findings talk about snapshots and PITR, S3 findings about versioning, replication, and object inventory. A dependency map is derived only from actual configuration references in the plan; resources whose relationships cannot be established are labeled unknown rather than guessed. A **risky-vs-revised comparison** shows precisely which findings resolve and which remain — reported as *fewer detected risks*, never as a guarantee of safety. An **Export review brief** button produces a Markdown report with evidence, unresolved questions, and approval checkboxes that an engineer can attach to a pull request.
+
+The demo follows one scenario: an AI coding agent proposes an infrastructure change; BlastRadius exposes a destructive database replacement and public ingress with evidence; the engineer's revised plan is compared side by side, showing six findings resolved and three remaining.
 
 ## Architecture
 
@@ -43,9 +45,9 @@ Built from hands-on experience reviewing Terraform changes across many AWS accou
 - **Source code:** https://github.com/Smart-SS/blastradius
 - **Agent-to-console proof:** [ADD REDACTED SCREENSHOT OR TRANSCRIPT]
 - **AWS services:** S3 and CloudFront with Origin Access Control, provisioned via CloudFormation.
-- **Demo:** Click "Try a risky plan" to show the database replacement, `deletion_protection` removal, `skip_final_snapshot`, and new public exposure — each with its trigger, impact, and verify/rollback checklist. Then click "Try a safe plan" to show the contrast: a clean, standard-review verdict. Finish with the review questions and resource list.
+- **Demo:** Click "Try a risky plan" to show the database replacement, `deletion_protection` removal, `skip_final_snapshot`, and new public exposure — each with evidence, impact, and resource-specific verify/rollback checks, plus the dependency map with unknowns labeled. Then click "Compare the revised plan" to show which findings resolve and which remain. Finish by exporting the Markdown review brief.
 - **Validation:** Confirm the public URL opens without login, the sample analysis works, and the judging bot can retrieve the page and assets.
 
 ## Next step
 
-Improve resource-level context and review annotations, then validate the findings against real change review workflows with consenting teams. Do not enter user counts, cost savings, or error reductions without measurement.
+Run a small, honestly reported evaluation: have three engineers review an unfamiliar plan with and without BlastRadius, recording what they catch, what confuses them, and how long the review takes. Then integrate the exported review brief into pull-request workflows (a CI step that comments the brief on the PR). Do not enter user counts, cost savings, or error reductions without measurement.

@@ -1,10 +1,10 @@
 # BlastRadius
 
-An original, browser-based Terraform change review app for the AWS Zero to Shipped 2026 challenge. It turns a `terraform show -json` plan into a concise risk brief that answers one question — *what could break if I apply this?* For each risky resource it shows the exact triggering change, the likely service impact, and a verify-and-rollback checklist. Plans are read only in the browser; the app makes no network requests for plan content.
+An original, browser-based Terraform change review app for the AWS Zero to Shipped 2026 challenge. It turns a `terraform show -json` plan into a risk brief built on one promise: *show the evidence behind a risky change, and show what remains unknown.* For each risky resource it shows the exact triggering change, the likely impact, and resource-specific verify/rollback checks; a dependency map derived only from actual plan references (with unknowns labeled honestly); a risky-vs-revised comparison reported as fewer detected risks; and an exportable Markdown review brief for pull requests. Plans are read only in the browser; the app makes no network requests for plan content.
 
 ## Run locally
 
-From this directory, run `python3 -m http.server 8080` and open `http://localhost:8080`. Click **Try a risky plan** to see a database replacement combined with new public exposure, or **Try a safe plan** for the clean-verdict contrast.
+From this directory, run `python3 -m http.server 8080` and open `http://localhost:8080`. Click **Try a risky plan** (an agent-proposed change with a database replacement and new public exposure), then **Compare the revised plan** to see which findings resolve and which remain, or **Try a safe plan** for the clean-verdict contrast.
 
 ## Review your own plan
 
